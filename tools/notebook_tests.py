@@ -19,7 +19,7 @@ class NotebookSyntheticTests(unittest.TestCase):
             (self.root / relative).mkdir(parents=True)
         self.person = {'tag': 'person', 'vbox': [10, 20, 30, 40], 'hbox': [20, 20, 10, 10]}
         for split in ('train', 'val'):
-            key = f'synthetic_{split}'
+            key = f'synthetic,{split}'
             Image.new('RGB', (100, 100)).save(self.root / 'raw/images' / f'{key}.jpg')
             record = {'ID': key, 'gtboxes': [self.person]}
             destination(f'annotation_{split}.odgt').write_text(json.dumps(record) + '\n')
@@ -60,9 +60,9 @@ class NotebookSyntheticTests(unittest.TestCase):
         sizes, counts = inspect_dataset()
         root = convert_dataset('vbox', sizes).parent
         self.assertEqual(counts, {'train': 1, 'val': 1})
-        self.assertTrue((root / 'images/train/synthetic_train.jpg').is_symlink())
-        self.assertFalse((root / 'images/val/synthetic_train.jpg').exists())
-        self.assertTrue((root / 'labels/val/synthetic_val.txt').exists())
+        self.assertTrue((root / 'images/train/synthetic,train.jpg').is_symlink())
+        self.assertFalse((root / 'images/val/synthetic,train.jpg').exists())
+        self.assertTrue((root / 'labels/val/synthetic,val.txt').exists())
 
     def test_yaml(self):
         import yaml

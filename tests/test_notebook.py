@@ -39,6 +39,11 @@ class StandaloneNotebookTests(unittest.TestCase):
                 if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
                     nodes.append(node)
                 elif isinstance(node, ast.Assign):
+                    if (isinstance(node.value, ast.Call)
+                            and isinstance(node.value.func, ast.Name)
+                            and node.value.func.id == 'ContextVar'):
+                        nodes.append(node)
+                        continue
                     try:
                         ast.literal_eval(node.value)
                     except (ValueError, TypeError):

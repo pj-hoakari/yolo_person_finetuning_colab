@@ -13,7 +13,7 @@ Google Colabの一時ストレージだけでCrowdHumanを取得・変換し、Y
 ## 最初に確認すること
 
 - [CrowdHuman公式配布ページ・利用条件](https://www.crowdhuman.org/download.html)では、非商用の研究・教育目的に用途を限定し、画像の再配布を禁止しています。本実装ではアノテーションも非公開として扱います。
-- ColabはGoogleのクラウド環境です。今回調査した配布ページだけから、あらゆる利用条件でクラウド処理が許されるとは判断していません。適用される条件を確認し、クラウド処理が禁止される場合はColabを使わずローカル環境用に別途移植してください。実データのローカル実行をこのコードの保存先制限で迂回しないでください。
+- ColabはGoogleのクラウド環境です。今回調査した配布ページだけから、あらゆる利用条件でクラウド処理が許されるとは判断していません。適用される条件を確認し、クラウド処理が禁止される場合はColabを使わずローカル環境用に別途移植してください。ノートブックはColab用です。明示的なローカル取得には、下記のダウンロード専用コマンドを使用してください。
 - [Ultralyticsのライセンス](https://www.ultralytics.com/license)はAGPL-3.0とEnterpriseの選択肢を案内しています。モデル・ライブラリの条件を確認してください。商用・非公開のWebアプリへの移行可否は、CrowdHumanの用途制限と独立に確認が必要です。
 - 学習済みモデルにもデータ由来の情報が含まれる可能性があります。重みのダウンロードは公開の許可を意味しません。
 
@@ -49,6 +49,7 @@ tools/build_notebook.py     # src/とノートブックの通常コードセル�
 tools/notebook_tests.py     # ノートブックへ直接収める合成テスト
 .github/workflows/tests.yml # 実データを使わないGitHub Actions
 tools/smoke_training.py     # 合成画像とランダム重みによる任意CPU結合テスト
+tools/download_crowdhuman.py # 実CrowdHumanの明示的なローカル取得
 requirements.txt
 .gitignore
 ```
@@ -82,6 +83,18 @@ requirements.txt
 自動取得に失敗した場合だけ、正規に入手したファイルをColabのアップロードUIで配置します。自動取得不能を既に確認した場合は`AUTO_DOWNLOAD=False`で手動経路に入れます。大容量ZIPのブラウザアップロードはRAMを使うため、必要なら1つずつアップロードしてセルを再実行してください。アップロード対象を間違えないでください。
 
 アップロード中のファイルは`raw/`に置かれ、検証後にarchives/annotationsへ移動します。正常な既存ファイルは再ダウンロードしません。既存ファイルが破損している場合は停止し、無言で置換しません。Colabのファイル欄で破損した対象を明示的に削除・交換して再実行します。
+
+### 実CrowdHumanをローカルへダウンロードする
+
+ノートブックの既定保存先はColabのままです。ローカルで実ファイルを取得する場合は、リポジトリのルートで次を実行します。Python標準ライブラリだけで動作し、GPUや追加パッケージは不要です。取得前に前述のデータ利用条件を確認してください。
+
+```bash
+python3 tools/download_crowdhuman.py
+```
+
+保存先はリポジトリ直下の`crowdhuman/`です。Gitで除外されていることを確認してから開始します。ZIP4個とODGT2個を取得・検証し、展開・学習は行いません。正常な取得済みファイルは再利用できます。データのアップロード処理はありません。
+
+ログは`crowdhuman/logs/download.jsonl`に追記します。取得不能なら終了コード1と理由を表示します。通常のターミナルから同じコマンドを再実行できます。ネットワークを制限された環境ではDNS/HTTPエラーになります。ローカル取得モードの保存先変更はそのコマンド実行中に限定され、Colabノートブックの既定保存先には影響しません。
 
 ### ダウンロード失敗時のログ
 
@@ -123,7 +136,7 @@ processedの画像はraw/imagesへのシンボリックリンクです。raw削�
 
 fbox（全身領域）は使いません。`tag != person`は除外します。`extra.ignore=1`はvboxだけ、`head_attr.ignore=1`はhboxだけを除外します。省略された属性・ignoreは0として扱い、不正な属性形式は該当bboxを不正件数として記録します。両フラグをORして頭部と人物をまとめて消す処理は行いません。
 
-bboxを画像境界へクリッピングしてからYOLOの中心x/中心y/幅/高さへ正規化します。ゼロ・負幅、非数、非有限値、クリッピング後の空矩形は除外します。モード別の`conversion.json`にsplit別の採用・ignore・不正・クリッピング件数を記録します。不正ODGT行や危険なID、画像不足、split重複、壊れたラベル/YAMLは停止条件です。
+bboxを画像境界へクリッピングしてからYOLOの中心x/中心y/幅/高さへ正規化します。ゼロ・負幅、非数、非有限値、クリッピング後の空矩形は除外します。モード別の`conversion.json`にsplit別の採用・ignore・不正・クリッピング件数を記録します。元データのカンマ入り画像IDを許可し、パス区切り・ドット・空白・制御文字を含むIDは拒否します。不正ODGT行や危険なID、画像不足、split重複、壊れたラベル/YAMLは停止条件です。
 
 **標準YOLOラベルはignore領域を表現できません。** 除外された人物・頭部・maskの領域は学習時に背景と扱われ、評価時にもignore領域の検出が誤検出になり得ます。空ラベル画像も背景画像として残します。これはCrowdHuman公式のignore対応評価や公式指標の再現ではなく、変換後のYOLOラベルに対する評価です。画像を加工してignore領域を隠す処理は行っていません。
 
@@ -151,7 +164,7 @@ ONNXはopset 13、dynamic、FP32、simplify=Falseで出力します。`onnx.chec
 
 ## プライバシーとGit
 
-実データの保存先はコードで`/content/crowdhuman/`配下に制限します。範囲外へのsymlinkも拒否します。Driveマウント、Hubアップロード、外部画像API、GitHub Releases/Artifacts/Actionsへの保存処理はありません。同期・外部実験追跡を設定で無効にし、HUB/Platform/analytics等のintegration callback登録も停止します。学習・検証のplot、画像表示、予測画像保存を使いません。大量ログはランタイム内のconsole.log等に保存し、ノートブックには要約だけを表示します。
+ノートブックの実データ保存先は`/content/crowdhuman/`配下に制限します。明示的なローカル取得CLIだけは、Git管理対象外のリポジトリ直下`crowdhuman/`を使用します。範囲外へのsymlinkも拒否します。Driveマウント、Hubアップロード、外部画像API、GitHub Releases/Artifacts/Actionsへの保存処理はありません。同期・外部実験追跡を設定で無効にし、HUB/Platform/analytics等のintegration callback登録も停止します。学習・検証のplot、画像表示、予測画像保存を使いません。大量ログはランタイム内のconsole.log等に保存し、ノートブックには要約だけを表示します。
 
 これはOSのネットワーク遮断ではありません。パッケージ・公式重み・Hugging Face上のCrowdHumanの取得にはネットワークを使います。ユーザーが別途外部連携を有効にしないでください。ノートブックを共有する前に、出力除去とステージ済みファイルを確認してください。
 
@@ -176,7 +189,7 @@ python3 tools/smoke_training.py --onnx-check
 
 実施済みの検証:
 
-- 合成データによる55件の自動テストが成功。HTTP 403・DNS失敗・既存ファイル破損・転送不足・中断・ログ書込失敗の診断、追記、秘密情報の除去も確認しました。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
+- 合成データによる61件の自動テストが成功。CrowdHuman形式のカンマ入り画像IDの解析・3モード変換と、危険なIDの拒否も確認しました。ローカル取得先の分離、例外時の保存先復帰、symlink拒否も確認しました。HTTP 403・DNS失敗・既存ファイル破損・転送不足・中断・ログ書込失敗の診断、追記、秘密情報の除去も確認しました。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
 - Ultralytics 8.4.52 / PyTorch 2.12.0+cu130のCPUで、独自作成した合成画像とランダム初期化YOLO26による3モード各1 epochの学習、評価、PT/CSV出力、比較CSV生成が成功しました。学習出力に画像ファイルが生成されないことも確認しました。これは公式事前学習重みからのFine-tuningや実精度の検証ではありません。
 - ランダム重みのYOLO26をopset 13・dynamic・FP32のONNXへ出力し、onnx.checkerが成功しました。
 - Pythonとノートブック全コードセルの構文、埋め込みソースの一致、出力が空であること、Git差分の空白エラーと管理対象を確認しました。
@@ -193,3 +206,5 @@ GitHubへ反映する前に差分を確認し、以下でコミットします�
 git add .gitignore .gitattributes .github README.md requirements.txt crowdhuman_finetuning.ipynb src tests tools
 git commit -m "feat: add standalone CrowdHuman Colab notebook"
 ```
+
+ローカル実ダウンロードの試行では、実行環境の名前解決が`[Errno -3] Temporary failure in name resolution`で失敗しました。HTTP応答には到達せず、データ取得は未完了です。診断ログはローカルの`crowdhuman/logs/download.jsonl`に保存されます。

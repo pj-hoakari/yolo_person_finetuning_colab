@@ -188,6 +188,42 @@ class SyntheticRuntime(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Invalid ODGT record'):
                 list(dataset.read_odgt(path))
 
+    def test_original_style_comma_ids_parse_and_convert(self):
+        for split in ('train', 'val'):
+            old_id = f'synthetic_{split}'
+            new_id = f'synthetic,{split}_001'
+            self.records[split][0]['ID'] = new_id
+            (self.base / 'raw/images' / f'{old_id}.jpg').rename(
+                self.base / 'raw/images' / f'{new_id}.jpg')
+        self.write_records()
+        sizes, counts = dataset.inspect_dataset()
+        self.assertEqual(counts, {'train': 1, 'val': 1})
+        for mode in ('vbox', 'hbox', 'both'):
+            root = converter.convert_dataset(mode, sizes).parent
+            for split in ('train', 'val'):
+                self.assertTrue((root / 'images' / split / f'synthetic,{split}_001.jpg').is_symlink())
+                self.assertTrue((root / 'labels' / split / f'synthetic,{split}_001.txt').is_file())
+            self.assertEqual(converter.validate_labels(root, mode)['val']['images'], 1)
+
+    def test_comma_support_still_rejects_unsafe_ids(self):
+        path = dataset.destination('annotation_train.odgt')
+        for image_id in ('', '..', '../synthetic,001', '/tmp/synthetic,001',
+                         'folder/synthetic,001', 'folder\\synthetic,001',
+                         'synthetic,001\n', 'synthetic,001.jpg', None, 123):
+            with self.subTest(image_id=image_id):
+                path.write_text(json.dumps({'ID': image_id, 'gtboxes': []}))
+                with self.assertRaisesRegex(ValueError, 'invalid image ID') as error:
+                    list(dataset.read_odgt(path))
+                self.assertNotIn('synthetic', str(error.exception))
+
+    def test_odgt_validation_reports_specific_reason(self):
+        path = dataset.destination('annotation_train.odgt')
+        for payload, reason in (('not-json', 'invalid JSON'), ('[]', 'expected a JSON object'),
+                                ('{"ID":"synthetic,001","gtboxes":{}}', 'gtboxes must be a list')):
+            path.write_text(payload)
+            with self.assertRaisesRegex(ValueError, reason):
+                list(dataset.read_odgt(path))
+
     def test_missing_files(self):
         missing = self.base / 'raw/annotations/missing.odgt'
         with self.assertRaises(FileNotFoundError):
@@ -405,6 +441,36 @@ class SyntheticRuntime(unittest.TestCase):
         (self.base / 'escape').symlink_to(self.base.parent, target_is_directory=True)
         with self.assertRaises(ValueError):
             privacy.runtime_path(self.base / 'escape/file')
+
+    def test_explicit_local_download_storage_is_scoped(self):
+        root = self.base / 'crowdhuman'
+        with privacy.local_download_storage(root):
+            for relative in ('raw/archives', 'raw/annotations', 'logs'):
+                (root / relative).mkdir(parents=True)
+            self.archives()
+            self.write_records()
+            with patch.object(dataset.urllib.request, 'urlopen', side_effect=AssertionError('no network expected')):
+                log = dataset.download_huggingface()
+            self.assertEqual(log, root / 'logs/download.jsonl')
+            self.assertTrue(log.is_file())
+            self.assertEqual(dataset.destination('annotation_train.odgt'), root / 'raw/annotations/annotation_train.odgt')
+            with self.assertRaises(ValueError):
+                privacy.runtime_path(self.base / 'outside')
+        self.assertEqual(privacy.storage_root(), self.base)
+        self.assertEqual(dataset.destination('annotation_train.odgt'), self.base / 'raw/annotations/annotation_train.odgt')
+
+    def test_local_download_scope_restored_after_failure(self):
+        with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
+            with privacy.local_download_storage(self.base / 'crowdhuman'):
+                raise RuntimeError('synthetic failure')
+        self.assertEqual(privacy.storage_root(), self.base)
+
+    def test_local_download_scope_rejects_symlink(self):
+        link = self.base / 'local_symlink'
+        link.symlink_to(self.base.parent, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            with privacy.local_download_storage(link):
+                self.fail('symlink destination must be rejected')
 
     def test_logs_are_local(self):
         logger = logging.getLogger('ultralytics')

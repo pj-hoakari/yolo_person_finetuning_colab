@@ -2,16 +2,36 @@
 import os
 import contextlib
 import logging
+from contextvars import ContextVar
 from pathlib import Path
 
 BASE = Path('/content/crowdhuman')
+_DOWNLOAD_STORAGE = ContextVar('crowdhuman_local_download_storage', default=None)
+
+
+def storage_root():
+    return _DOWNLOAD_STORAGE.get() or BASE
+
+
+@contextlib.contextmanager
+def local_download_storage(directory):
+    """Explicit local-download scope; leave the notebook's default storage unchanged."""
+    root = Path(directory).expanduser().absolute()
+    if root.resolve() != root:
+        raise ValueError('Local download directory must not traverse symlinks')
+    token = _DOWNLOAD_STORAGE.set(root)
+    try:
+        yield root
+    finally:
+        _DOWNLOAD_STORAGE.reset(token)
 
 
 def runtime_path(path):
     path = Path(path).absolute()
     resolved = path.resolve()
-    if resolved != BASE and BASE not in resolved.parents:
-        raise ValueError('CrowdHuman paths must stay under /content/crowdhuman')
+    root = storage_root()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f'CrowdHuman paths must stay under {root}')
     return path
 
 

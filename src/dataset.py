@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import zipfile
 import zlib
 from pathlib import Path
-from .privacy import BASE, runtime_path
+from .privacy import BASE, runtime_path, storage_root
 
 HF_REPO_ID = 'sshao0516/CrowdHuman'
 HF_REVISION = 'd97203da87e348ea69f7a7633a57c21a956120a6'
@@ -24,7 +24,7 @@ EXPECTED = {'train': 15000, 'val': 4370}
 def destination(name):
     if name not in ARCHIVES + ANNOTATIONS:
         raise ValueError('Unexpected dataset filename')
-    return BASE / 'raw' / ('archives' if name in ARCHIVES else 'annotations') / name
+    return storage_root() / 'raw' / ('archives' if name in ARCHIVES else 'annotations') / name
 
 
 def read_odgt(path):
@@ -34,13 +34,17 @@ def read_odgt(path):
         for line_no, line in enumerate(handle, 1):
             try:
                 record = json.loads(line)
-                image_id = record['ID']
-                if not isinstance(image_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', image_id):
-                    raise ValueError()
-                if not isinstance(record['gtboxes'], list):
-                    raise ValueError()
-            except (ValueError, TypeError, KeyError):
-                raise ValueError(f'Invalid ODGT record at line {line_no}') from None
+            except (ValueError, TypeError):
+                raise ValueError(f'Invalid ODGT record at line {line_no}: invalid JSON') from None
+            if not isinstance(record, dict):
+                raise ValueError(f'Invalid ODGT record at line {line_no}: expected a JSON object')
+            image_id = record.get('ID')
+            # Original CrowdHuman image stems contain a comma. Keep separators,
+            # dots, whitespace and control characters excluded from filesystem IDs.
+            if not isinstance(image_id, str) or not re.fullmatch(r'[A-Za-z0-9_,\-]+', image_id):
+                raise ValueError(f'Invalid ODGT record at line {line_no}: invalid image ID')
+            if not isinstance(record.get('gtboxes'), list):
+                raise ValueError(f'Invalid ODGT record at line {line_no}: gtboxes must be a list')
             yield record
 
 
@@ -119,7 +123,7 @@ def _download_error_details(error):
 
 def download_huggingface(repo_id=HF_REPO_ID, revision=HF_REVISION):
     """Download public files and retain sanitized diagnostics inside the runtime."""
-    log_path = runtime_path(BASE / 'logs/download.jsonl')
+    log_path = runtime_path(storage_root() / 'logs/download.jsonl')
     context = {'attempt_id': uuid.uuid4().hex, 'stage': 'configuration'}
     temp = None
     try:
@@ -152,14 +156,14 @@ def download_huggingface(repo_id=HF_REPO_ID, revision=HF_REVISION):
                     raise RuntimeError('Hugging Face returned an access page instead of a file')
                 length = int(response.headers.get('Content-Length', 0))
                 context.update(expected_bytes=length, stage='disk_space_check',
-                               free_bytes=shutil.disk_usage(BASE).free)
+                               free_bytes=shutil.disk_usage(storage_root()).free)
                 _download_event(log_path, context, 'response')
                 if length and context['free_bytes'] < length + 2 * 1024**3:
                     raise OSError('Insufficient download disk space')
                 context['stage'] = 'transfer'
                 last_progress = 0
                 while chunk := response.read(1024**2):
-                    context['free_bytes'] = shutil.disk_usage(BASE).free
+                    context['free_bytes'] = shutil.disk_usage(storage_root()).free
                     if context['free_bytes'] < len(chunk) + 1024**3:
                         raise OSError('Insufficient download disk space')
                     out.write(chunk)
@@ -175,7 +179,7 @@ def download_huggingface(repo_id=HF_REPO_ID, revision=HF_REVISION):
             temp = None
             _download_event(log_path, context, 'file_complete')
         context['stage'] = 'save_source_metadata'
-        source = runtime_path(BASE / 'raw/download_source.json')
+        source = runtime_path(storage_root() / 'raw/download_source.json')
         source.write_text(json.dumps({'requested_repo_id': repo_id, 'requested_revision': revision,
                                       'downloaded': needed,
                                       'reused_existing': [name for name in ARCHIVES + ANNOTATIONS if name not in needed]}, indent=2))
@@ -208,11 +212,11 @@ def upload_missing():
     import os
     previous = Path.cwd()
     try:
-        os.chdir(runtime_path(BASE / 'raw'))
+        os.chdir(runtime_path(storage_root() / 'raw'))
         uploaded = files.upload()
         del uploaded  # Browser upload may use substantial RAM for large archives.
         for name in ARCHIVES + ANNOTATIONS:
-            staged = BASE / 'raw' / name
+            staged = storage_root() / 'raw' / name
             if staged.exists():
                 target = destination(name)
                 if target.exists():
@@ -234,11 +238,11 @@ def inventory():
     for split in EXPECTED:
         if counts[f'annotation_{split}.odgt'] != EXPECTED[split]:
             raise ValueError('Official annotation count mismatch')
-    return {'annotation_counts': counts, 'free_gib': round(shutil.disk_usage(BASE).free / 1024**3, 2)}
+    return {'annotation_counts': counts, 'free_gib': round(shutil.disk_usage(storage_root()).free / 1024**3, 2)}
 
 
 def extract_archives():
-    root = runtime_path(BASE / 'raw/images')
+    root = runtime_path(storage_root() / 'raw/images')
     entries = []
     seen = set()
     for name in ARCHIVES:
@@ -257,7 +261,7 @@ def extract_archives():
                 target = runtime_path(root / parts[1])
                 entries.append((archive, item.filename, target, item.file_size, item.CRC))
     required = sum(size for _, _, p, size, _ in entries if not p.exists() or p.stat().st_size != size)
-    if shutil.disk_usage(BASE).free < required + 2 * 1024**3:
+    if shutil.disk_usage(storage_root()).free < required + 2 * 1024**3:
         raise OSError('Insufficient extraction space (plus 2 GiB reserve)')
     # Compare CRCs before reuse; a same-size corrupt image must also be replaced.
     for archive in map(destination, ARCHIVES):
@@ -304,7 +308,7 @@ def inspect_dataset():
             if key in ids:
                 raise ValueError('Duplicate image ID within split')
             ids.add(key)
-            sizes[key] = image_size(BASE / 'raw/images' / f'{key}.jpg')
+            sizes[key] = image_size(storage_root() / 'raw/images' / f'{key}.jpg')
         splits[split] = ids
     if splits['train'] & splits['val']:
         raise ValueError('Train/val overlap detected')
