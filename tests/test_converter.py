@@ -710,6 +710,66 @@ class SyntheticRuntime(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'cannot resume'):
                 trainer.train(config, resume=True)
 
+    def test_train_restores_drive_snapshot_after_local_run_loss(self):
+        sizes, _ = dataset.inspect_dataset()
+        converter.convert_dataset('vbox', sizes)
+        config = trainer.TrainConfig(epochs=3, batch=2, imgsz=64, allow_cpu=True)
+        model = Mock()
+        torch = SimpleNamespace(manual_seed=Mock(), cuda=SimpleNamespace(is_available=lambda: False),
+                                load=Mock(return_value={'epoch': 0, 'optimizer': {'synthetic': True}}))
+        numpy = SimpleNamespace(random=SimpleNamespace(seed=Mock()))
+        drive = self.base / 'private_drive/checkpoints'
+        def interrupt_after_epoch(**kwargs):
+            (config.run_dir / 'weights').mkdir()
+            (config.run_dir / 'weights/last.pt').write_bytes(b'synthetic-checkpoint-not-a-model')
+            callback = model.add_callback.call_args.args[1]
+            callback(SimpleNamespace(epoch=0))
+            raise KeyboardInterrupt()
+        model.train.side_effect = interrupt_after_epoch
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict('sys.modules', torch=torch, numpy=numpy))
+            stack.enter_context(patch.object(trainer, 'device_for', return_value='cpu'))
+            stack.enter_context(patch.object(trainer, 'versions', return_value={'ultralytics': 'synthetic'}))
+            stack.enter_context(patch.object(trainer, 'load_model', return_value=model))
+            stack.enter_context(patch.object(trainer, 'private_yolo', return_value=Mock(return_value=model)))
+            with self.assertRaises(KeyboardInterrupt):
+                trainer.train(config, drive_runs_dir=drive)
+            self.assertTrue((drive / 'vbox/experiment/latest.json').is_file())
+            with self.assertRaisesRegex(FileExistsError, 'Drive experiment exists'):
+                trainer.train(config, drive_runs_dir=drive)
+            dataset.shutil.rmtree(config.run_dir)
+            model.train.side_effect = None
+            trainer.train(config, resume=True, drive_runs_dir=drive)
+            self.assertTrue(model.train.call_args.kwargs['resume'])
+            meta = json.loads((config.run_dir / 'experiment.json').read_text())
+            self.assertEqual([session['status'] for session in meta['sessions']], ['interrupted', 'completed'])
+            self.assertEqual(model.add_callback.call_args.args[0], 'on_model_save')
+
+    def test_drive_save_failure_stops_training_and_records_error(self):
+        sizes, _ = dataset.inspect_dataset()
+        converter.convert_dataset('vbox', sizes)
+        config = trainer.TrainConfig(epochs=3, batch=2, imgsz=64, allow_cpu=True)
+        model = Mock()
+        torch = SimpleNamespace(manual_seed=Mock(), cuda=SimpleNamespace(is_available=lambda: False))
+        numpy = SimpleNamespace(random=SimpleNamespace(seed=Mock()))
+        def save_epoch(**kwargs):
+            model.add_callback.call_args.args[1](SimpleNamespace(epoch=0))
+        model.train.side_effect = save_epoch
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict('sys.modules', torch=torch, numpy=numpy))
+            stack.enter_context(patch.object(trainer, 'device_for', return_value='cpu'))
+            stack.enter_context(patch.object(trainer, 'versions', return_value={}))
+            stack.enter_context(patch.object(trainer, 'load_model', return_value=model))
+            stack.enter_context(patch.object(trainer, 'private_yolo', return_value=Mock(return_value=model)))
+            stack.enter_context(patch.object(trainer, 'save_drive_checkpoint', side_effect=OSError(28, 'synthetic Drive full')))
+            with self.assertRaisesRegex(RuntimeError, 'training stopped'):
+                trainer.train(config, drive_runs_dir=self.base / 'drive')
+        failure = json.loads((config.run_dir / 'drive_backup_error.json').read_text())
+        self.assertEqual(failure['epoch'], 1)
+        self.assertEqual(failure['errors'][0]['errno'], 28)
+        self.assertIn('Drive full', failure['errors'][0]['message'])
+        model.train.assert_called_once()
+
     def test_initialization_rejects_escaped_directory(self):
         (self.base / 'config').symlink_to(self.base.parent, target_is_directory=True)
         with self.assertRaises(ValueError):

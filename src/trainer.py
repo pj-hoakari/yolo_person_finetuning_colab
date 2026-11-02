@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from .privacy import BASE, private_yolo, runtime_path, local_console
 from .converter import NAMES, validate_labels
+from .checkpoints import drive_experiment_dir, save_drive_checkpoint, restore_drive_checkpoint
+from .dataset import _download_error_details
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,7 @@ def load_model(config):
         os.chdir(previous)
 
 
-def train(config, resume=False):
+def train(config, resume=False, drive_runs_dir=None, checkpoint_status=None):
     config.validate()
     import numpy as np
     import torch
@@ -91,6 +93,12 @@ def train(config, resume=False):
     run = config.run_dir
     meta_path = run / 'experiment.json'
     specification = {'config': asdict(config), 'dataset_fingerprint': conversion['fingerprint'], 'versions': versions()}
+    if drive_runs_dir is not None:
+        drive_run = drive_experiment_dir(config, drive_runs_dir)
+        if not resume and (drive_run / 'latest.json').exists():
+            raise FileExistsError('Drive experiment exists; resume it or select a new run_name')
+        if resume and not meta_path.exists():
+            restore_drive_checkpoint(config, drive_runs_dir, specification)
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
         if not resume:
@@ -111,16 +119,39 @@ def train(config, resume=False):
         # Only our trusted runtime checkpoint; never load arbitrary uploaded pickle files.
         ckpt = torch.load(checkpoint, map_location='cpu', weights_only=False)
         if ckpt.get('epoch', -1) < 0 or ckpt.get('optimizer') is None:
-            raise ValueError('Completed/stripped checkpoint cannot resume; start a new run')
+            raise ValueError('Completed/stripped checkpoint cannot resume; restore the raw Drive snapshot into a fresh local run')
+        if ckpt['epoch'] + 1 >= config.epochs:
+            raise ValueError('Checkpoint already reached the configured final epoch')
         del ckpt
     started = time.perf_counter()
     status = 'interrupted'
+    session = {'seconds': 0.0, 'status': 'running', 'resume': resume}
+    meta['sessions'].append(session)
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+    def persist_epoch(trainer_instance):
+        epoch = int(trainer_instance.epoch) + 1
+        session['seconds'] = time.perf_counter() - started
+        meta_path.write_text(json.dumps(meta, indent=2))
+        try:
+            saved = save_drive_checkpoint(config, drive_runs_dir, epoch)
+        except Exception as error:
+            failure = {'epoch': epoch, 'type': type(error).__name__,
+                       'message': 'Drive checkpoint save failed', 'errors': _download_error_details(error)}
+            (run / 'drive_backup_error.json').write_text(json.dumps(failure, indent=2))
+            raise RuntimeError(f'Drive checkpoint save failed at epoch {epoch}; training stopped so unsaved epochs do not accumulate') from error
+        if checkpoint_status is not None:
+            checkpoint_status(saved)
+
     try:
         # Keep epoch progress and diagnostic output out of the notebook document.
         with local_console(run / 'console.log'):
             model = YOLO(str(checkpoint)) if resume else load_model(config)
+            if drive_runs_dir is not None:
+                model.add_callback('on_model_save', persist_epoch)
             if resume:
-                model.train(resume=True, plots=False, save_json=False, save_txt=False, device=device)
+                model.train(resume=True, data=str(root / 'data.yaml'), plots=False,
+                            save=True, save_period=-1, save_json=False, save_txt=False, device=device)
             else:
                 model.train(data=str(root / 'data.yaml'), epochs=config.epochs, batch=config.batch,
                             imgsz=config.imgsz, seed=config.seed, deterministic=True,
@@ -132,6 +163,6 @@ def train(config, resume=False):
                             save_json=False, save_txt=False, verbose=False)
         status = 'completed'
     finally:
-        meta['sessions'].append({'seconds': time.perf_counter()-started, 'status': status, 'resume': resume})
+        session.update(seconds=time.perf_counter()-started, status=status)
         meta_path.write_text(json.dumps(meta, indent=2))
     return run

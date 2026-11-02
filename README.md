@@ -41,7 +41,8 @@ COCOのperson事前学習モデルをそのままheadの正解ラベルで比較
 crowdhuman_finetuning.ipynb  # 出力なし・日本語19段階・コード同梱
 src/dataset.py              # Hugging Face取得、ZIP/ODGT/画像検証、安全な展開
 src/converter.py            # vbox / hbox / both変換、ラベル検査
-src/trainer.py             # 学習設定、再開、実験情報
+src/trainer.py              # 学習設定、毎epoch保存、再開、実験情報
+src/checkpoints.py          # Driveスナップショット、照合、ランタイム復元
 src/evaluator.py            # 評価、比較CSV、ONNX検査、手動ダウンロード
 src/privacy.py              # 保存先制限、外部連携停止、ログ制御
 tests/test_converter.py     # 実データ不要の合成テスト
@@ -64,7 +65,7 @@ requirements.txt
 6. セル18で`DOWNLOAD_NAMES`に必要なファイルを列挙し、`DO_DOWNLOAD=True`としてそのセルを明示実行します。
 7. 必要な重みの取得を確認後、セル19の削除フラグを必要なものだけ有効にします。
 
-**ランタイム終了・リセットで、Colab内のコピー、展開画像、ラベル、ログ、チェックポイント、exportsは失われます。** Driveに保管した元ZIP・ODGTは残るため、次回はDriveから再コピーできます。学習済み重みは自動でDriveへ保存しないため、必要なものをセル18で取得してください。セル19の削除対象もColab側だけです。
+**ランタイム終了・リセットで、Colab内のコピー、展開画像、ラベル、ログ、チェックポイント、exportsは失われます。** Driveに保管した元ZIP・ODGTは残るため、次回はDriveから再コピーできます。既定で毎epochの再開用チェックポイントもDriveへ保存します。配布・アプリ利用向けのPT/ONNX/CSVはセル17〜18で出力・取得してください。セル19の削除対象もColab側だけです。
 
 ### Google Driveへの保管とColabへのコピー
 
@@ -108,7 +109,7 @@ MyDrive/crowdhuman/
 
 同じColabセッションの再実行ではDriveとローカルのSHA-256が一致し、検証を通過したファイルを再利用します。異なるローカルファイルは上書きせず停止します。ログを確認して対象のColab側ファイルを明示削除し、再コピーしてください。Driveの元ファイルはコピー処理で変更・削除しません。
 
-展開画像、YOLOラベル、学習・評価結果はColab内で扱います。元ファイルをDriveに保管することは、画像・アノテーションの公開や再配布を許可するものではありません。
+展開画像とYOLOラベルはColab内で扱います。学習はColabで行い、再開用チェックポイント・実験設定・学習CSVを毎epoch Driveへ保存します。元ファイルをDriveに保管することは、画像・アノテーションの公開や再配布を許可するものではありません。
 
 ### 実CrowdHumanをローカルへダウンロードする
 
@@ -186,7 +187,27 @@ bboxを画像境界へクリッピングしてからYOLOの中心x/中心y/幅/�
 
 推論速度はbatch=1・FP32のvalidation内部のinference時間です。前処理・後処理・ブラウザ・追跡は含みません。学習時間はモデル準備を含み、中断・再開分も合算します。early stoppingにより実際のepoch数が異なることがあります。各`results.csv`も確認してください。
 
-同じセッションの中断から再開するには、同一設定・RUN_NAMEで`RESUME=True`として学習セルを再実行します。last.ptにoptimizerと有効なepochがあること、保存した設定・変換指紋・依存バージョンが一致することを要求します。完了時にoptimizerを削除したcheckpointは再開対象になりません。既存実験への新規学習の上書きは拒否します。
+毎epochの終了時に、optimizerを含む再開用チェックポイントをDriveへ保存します。設定の既定値は次のとおりです。
+
+```python
+SAVE_EVERY_EPOCH_TO_DRIVE = True
+DRIVE_CHECKPOINT_DIR = '/content/drive/MyDrive/crowdhuman/checkpoints'
+RESUME = False
+```
+
+保存先は`checkpoints/<mode>/<RUN_NAME>/epoch_000001_<識別子>/`です。各スナップショットに`weights/last.pt`、存在する場合の`weights/best.pt`、`experiment.json`、`results.csv`、`args.yaml`を保存します。画像・ラベル・学習バッチは含めません。各ファイルのSHA-256を照合し、保存が完了してから`latest.json`を更新します。各epochの履歴を残すため、Drive使用量は保存回数に応じて増えます。
+
+Colabのランタイムがリセットされた後も、次の手順で再開できます。
+
+1. 元と同じ`RUN_NAME`、学習モード、EPOCHS等の学習設定、DEBUG設定を指定し、`RESUME=True`にします。`MODES_TO_RUN`には再開するモードだけを指定してください。
+2. ノートブックを上から実行してDriveをマウントし、元データをColabへコピー・再変換します。
+3. 学習セルで、ローカルに実験がなければDriveの最新の保存済みスナップショットを自動復元します。実験設定・データ指紋・依存バージョン・ファイルSHA-256が一致することを確認してから、optimizer等を復元して次のepochから学習します。
+
+例えばEPOCHS=50でepoch 12の保存完了後に停止した場合、設定を変えずに再開するとepoch 13〜50を学習します。途中のepochで切断された場合は、そのepochを最初からやり直します。目標epoch数を既に完了したチェックポイントは再開対象になりません。
+
+Ultralyticsが学習終了時にoptimizerを削除する前のチェックポイントをDriveへ保存するため、Drive側には再開用状態が残ります。ローカルに完了後のoptimizer除去済みlast.ptがある場合は、それを直接resumeできません。元のDrive保存は残したまま該当するColab側のrunディレクトリを明示削除し、必要に応じてDriveから復元してください。ただし設定済みの最終epochに到達していれば再開を拒否します。
+
+Drive保存に失敗すると学習を停止し、未保存のまま次のepochへ進みません。理由はColabのrunディレクトリ内`drive_backup_error.json`へ残します。保存途中の強制終了時は、`latest.json`が指す直前の保存完了スナップショットを使います。ノートブックには保存完了したepochとDriveの保存先を表示します。既存実験への新規学習の上書きは拒否します。
 
 DEBUGから本番への移行やデータ変更時は、該当`processed/<mode>`をColabファイル欄から明示削除して再変換し、別のRUN_NAMEで新規学習します。rawは再利用できます。モードごとに実験を残し、比較CSVは保存済み条件が揃わない行も一致フラグをFalseにして表示します。
 
@@ -221,21 +242,24 @@ python3 tools/build_notebook.py --check
 python3 tools/smoke_training.py
 # onnxを導入した環境では、同じ結合試験にONNX出力・checkerを追加
 python3 tools/smoke_training.py --onnx-check
+# 合成画像でepoch 1保存後に中断→ローカルrun削除→復元してepoch 2まで再開
+python3 tools/smoke_training.py --drive-resume
 ```
 
 ノートブックには関数定義と合成テストを通常のコードセルとして収めています。開発用src・合成テストを変更した後は再生成してください。ノートブックだけで動くことも合成テストで確認します。保存済みノートブックは実行回数null・全outputs空です。開発時にコードとノートブック全セルの構文も確認します。
 
 実施済みの検証:
 
-- 合成データによる75件の自動テストが成功。Driveを模したフォルダからのコピー、再利用、SHA-256不一致、CRC破損、不足ファイル、容量不足、symlink拒否とノートブックのDrive→Colab処理順も確認しました。進捗の完了数・表示頻度・サイズ不明時の表示・Colabの表示更新と、進捗付きCRC検証による破損検出も確認しました。CrowdHuman形式のカンマ入り画像IDの解析・3モード変換と、危険なIDの拒否も確認しました。ローカル取得先の分離、例外時の保存先復帰、symlink拒否も確認しました。HTTP 403・DNS失敗・既存ファイル破損・転送不足・中断・ログ書込失敗の診断、追記、秘密情報の除去も確認しました。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
+- 合成データによる87件の自動テストが成功。毎epoch保存・ランタイム消失後の復元・破損検出・設定不一致拒否・Drive保存失敗時の停止と前回の保存保持も確認しました。Driveを模したフォルダからのコピー、再利用、SHA-256不一致、CRC破損、不足ファイル、容量不足、symlink拒否とノートブックのDrive→Colab処理順も確認しました。進捗の完了数・表示頻度・サイズ不明時の表示・Colabの表示更新と、進捗付きCRC検証による破損検出も確認しました。CrowdHuman形式のカンマ入り画像IDの解析・3モード変換と、危険なIDの拒否も確認しました。ローカル取得先の分離、例外時の保存先復帰、symlink拒否も確認しました。HTTP 403・DNS失敗・既存ファイル破損・転送不足・中断・ログ書込失敗の診断、追記、秘密情報の除去も確認しました。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
 - Ultralytics 8.4.52 / PyTorch 2.12.0+cu130のCPUで、独自作成した合成画像とランダム初期化YOLO26による3モード各1 epochの学習、評価、PT/CSV出力、比較CSV生成が成功しました。学習出力に画像ファイルが生成されないことも確認しました。これは公式事前学習重みからのFine-tuningや実精度の検証ではありません。
+- 合成画像と実際のYOLO26のCPU試験で、epoch 1の保存直後に中断し、ローカルrunを削除後、Driveを模したフォルダから復元してoptimizer付きでepoch 2まで再開できました。
 - ランダム重みのYOLO26をopset 13・dynamic・FP32のONNXへ出力し、onnx.checkerが成功しました。
 - Pythonとノートブック全コードセルの構文、埋め込みソースの一致、出力が空であること、Git差分の空白エラーと管理対象を確認しました。
 
 未検証:
 
 - Colabの実GPU、公式事前学習重みの取得、CrowdHuman実ファイルのダウンロード・展開・学習。実画像・実ODGTは開発環境へ取得していません。
-- Google Driveの実マウント、実データのDrive保管・Colabへのコピー、files.downloadの実操作、実GPUのcheckpointからの再開。再開分岐と設定変更拒否はモックによるテストです。
+- Google Driveの実マウント、実データのDrive保管・Colabへのコピー、files.downloadの実操作、実GPUのcheckpointからの再開。Drive保存・復元は合成データと一時フォルダで検証しています。
 - ONNX Runtime実推論（開発環境に未導入）、ONNX Runtime Web、既存Webアプリ・追跡器との入出力互換性。ColabにはRuntimeをインストールし、エクスポート時の合成推論検査を実装しています。
 
 GitHubへ反映する前に差分を確認し、以下でコミットします。データ・モデルは管理対象に含めないでください。

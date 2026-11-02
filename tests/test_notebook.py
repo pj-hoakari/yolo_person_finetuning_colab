@@ -40,6 +40,15 @@ class StandaloneNotebookTests(unittest.TestCase):
         self.assertNotIn('DRIVE_DATASET_DIR', cleanup)
         self.assertNotIn('drive_dataset', cleanup)
 
+    def test_drive_epoch_backup_is_enabled_and_checkpoint_code_is_inline(self):
+        notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
+        sources = [''.join(cell['source']) for cell in notebook['cells'] if cell['cell_type'] == 'code']
+        self.assertTrue(any('SAVE_EVERY_EPOCH_TO_DRIVE = True' in source for source in sources))
+        self.assertTrue(any('def restore_drive_checkpoint' in source for source in sources))
+        training = next(source for source in sources if 'trained_runs = {}' in source)
+        self.assertIn('drive_runs_dir=DRIVE_CHECKPOINT_DIR', training)
+        self.assertIn('checkpoint_status=show_saved_epoch', training)
+
     def test_inline_synthetic_suite(self):
         notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
         # Execute only imports, definitions and literal constants. No Colab setup,

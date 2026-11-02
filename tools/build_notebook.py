@@ -91,7 +91,9 @@ SEED = 42
 DEBUG_MODE = False
 DEBUG_LIMIT = 32  # 各splitの先頭N画像。すべてのモードで同じ画像。
 RUN_NAME = 'experiment'
-RESUME = False
+RESUME = False  # 中断から再開する場合はTrue。Driveの最新保存を自動復元。
+SAVE_EVERY_EPOCH_TO_DRIVE = True
+DRIVE_CHECKPOINT_DIR = '/content/drive/MyDrive/crowdhuman/checkpoints'
 ALLOW_CPU = False
 TERMS_REVIEWED = False
 DRIVE_MOUNT_POINT = '/content/drive'
@@ -191,7 +193,9 @@ vboxは0:person、hboxは0:head、bothは0:person / 1:headです。データの�
 参考実装のyolo26n.pt（設定でyolo26s.ptも選択可能）を使用します。
 公式Ultralytics重みをランタイムに取得し、同じセッションではキャッシュを再利用します。
 外部からアップロードした信頼できない.ptは読み込みません。''')
-    code(inline_source('trainer.py') + '\n\n' + '''configs = [TrainConfig(mode=mode, model=BASE_MODEL, epochs=EPOCHS, batch=BATCH_SIZE,
+    code(inline_source('checkpoints.py') + '\n\n' + inline_source('trainer.py') + '\n\n' + '''if SAVE_EVERY_EPOCH_TO_DRIVE and Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_CHECKPOINT_DIR).absolute().parents:
+    raise ValueError('DRIVE_CHECKPOINT_DIRはマウントしたGoogle Drive配下に指定してください。')
+configs = [TrainConfig(mode=mode, model=BASE_MODEL, epochs=EPOCHS, batch=BATCH_SIZE,
                        imgsz=IMAGE_SIZE, seed=SEED, debug=DEBUG_MODE, run_name=RUN_NAME,
                        allow_cpu=ALLOW_CPU) for mode in MODES_TO_RUN]
 for config in configs:
@@ -204,11 +208,28 @@ print('モデル準備完了')''')
     md('''## 14. 追加学習とチェックポイント管理
 同じ初期モデル・seed・学習条件で各モードを学習します。結果はruns/<mode>/<RUN_NAME>です。
 進捗や画像はノートブックに表示せず、ログはランタイムに保存します。T4でOOMが出たらbatchを8などに下げ、新しい実験名を使ってください。
-中断時のlast.ptから同じセッション内で再開できます。完了後にoptimizerが除去された重みはresumeできません。
+毎epoch終了時にoptimizerを含む再開用last.ptとbest.pt・学習設定・CSVをGoogle Driveへ保存します。
+保存先はDRIVE_CHECKPOINT_DIR/<mode>/<RUN_NAME>/epoch_XXXXXX_...です。SHA-256照合後に最新保存のポインタを更新します。
+新しいランタイムでも、同じデータ・設定・RUN_NAMEでRESUME=Trueにして上から実行すると、Driveから復元して最後に保存できたepochの次から再開します。
+再開するモードだけをMODES_TO_RUNに指定してください。目標epoch数まで完了したチェックポイントは再開対象になりません。
+Drive保存に失敗した場合は学習を停止し、未保存のまま次のepochへ進みません。Drive保存中の強制終了では、その前に保存完了したepochから再開します。
 本番比較はearly stoppingで実際のepoch数が異なる可能性もあるため、training CSVも確認してください。''')
-    code('''trained_runs = {}
+    code('''checkpoint_display = None
+def show_saved_epoch(saved):
+    global checkpoint_display
+    from html import escape
+    from IPython.display import HTML, display
+    content = HTML('<pre>Drive保存完了: epoch ' + str(saved['epoch']) + '<br>' + escape(saved['directory']) + '</pre>')
+    if checkpoint_display is None:
+        checkpoint_display = display(content, display_id=True)
+    else:
+        checkpoint_display.update(content)
+
+trained_runs = {}
 for config in configs:
-    trained_runs[config.mode] = train(config, resume=RESUME)
+    trained_runs[config.mode] = train(config, resume=RESUME,
+                                      drive_runs_dir=DRIVE_CHECKPOINT_DIR if SAVE_EVERY_EPOCH_TO_DRIVE else None,
+                                      checkpoint_status=show_saved_epoch)
     print(config.mode, '学習完了')''')
     md('''## 15. 評価
 各モデルをそれぞれのval正解ラベルで評価します。Precision・Recall・mAP50・mAP50-95、学習時間、推論ms/画像、重みMiBを記録します。
@@ -248,7 +269,7 @@ else:
     print('ダウンロード未実行')''')
     md('''## 19. 一時データの削除（任意）
 学習済みモデルの取得を確認してから実行してください。初期状態では削除しません。
-DELETE_DATA=Trueはrawとprocessedを削除します。DELETE_RUNS=Trueはチェックポイントと学習ログも削除し、再開できなくなります。
+DELETE_DATA=Trueはrawとprocessedを削除します。DELETE_RUNS=TrueはColab内のチェックポイントと学習ログを削除します。Drive側の保存は残るため、RESUME=Trueで復元できます。
 DEBUGから本番へ切り替える際は、DELETE_DATAを使うとrawも消えます。rawを再利用する場合はColabファイル欄でprocessed/<mode>だけを明示的に削除し、新しいRUN_NAMEで変換・学習してください。
 exportsは残ります。ランタイムのリセットではexportsも含めて消失します。
 このセルはDriveの保管フォルダを削除しません。次のランタイムではDriveから再コピーできます。''')

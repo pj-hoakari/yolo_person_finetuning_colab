@@ -8,6 +8,7 @@ import json
 import argparse
 import sys
 import tempfile
+import shutil
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,7 @@ from src import converter, dataset, evaluator, privacy, trainer
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--onnx-check', action='store_true', help='also export ONNX and run checker (no ONNX Runtime required)')
+    parser.add_argument('--drive-resume', action='store_true', help='interrupt vbox after epoch 1 and resume after deleting its local run')
     args = parser.parse_args()
     from PIL import Image, ImageDraw
     with tempfile.TemporaryDirectory(prefix='synthetic-yolo-smoke-') as directory, ExitStack() as stack:
@@ -41,12 +43,27 @@ def main():
         sizes, _ = dataset.inspect_dataset()
         for mode in ('vbox', 'hbox', 'both'):
             converter.convert_dataset(mode, sizes)
-            config = trainer.TrainConfig(mode=mode, epochs=1, batch=2, imgsz=64,
+            config = trainer.TrainConfig(mode=mode, epochs=2 if args.drive_resume and mode == 'vbox' else 1, batch=2, imgsz=64,
                                          workers=0, allow_cpu=True, run_name='synthetic')
             try:
                 # Random architecture proves API plumbing; this is not fine-tuning evidence.
                 with patch.object(trainer, 'load_model', side_effect=lambda _: YOLO('yolo26n.yaml')):
-                    run = trainer.train(config)
+                    if args.drive_resume and mode == 'vbox':
+                        drive = root / 'private_drive/checkpoints'
+                        def interrupt_after_backup(saved):
+                            raise KeyboardInterrupt('synthetic runtime interruption after saved epoch')
+                        try:
+                            trainer.train(config, drive_runs_dir=drive, checkpoint_status=interrupt_after_backup)
+                        except KeyboardInterrupt:
+                            pass
+                        assert (drive / mode / config.run_dir.name / 'latest.json').is_file()
+                        shutil.rmtree(config.run_dir)
+                        run = trainer.train(config, resume=True, drive_runs_dir=drive)
+                        manifest = json.loads((drive / mode / run.name / 'latest.json').read_text())
+                        assert manifest['epoch'] == 2
+                        print('Synthetic Drive: epoch 1 backup / local run deletion / optimizer resume to epoch 2 passed', flush=True)
+                    else:
+                        run = trainer.train(config)
                 evaluator.evaluate(config)
                 evaluator.export_model(config, onnx_export=False)
                 from ultralytics.utils import callbacks
