@@ -38,7 +38,7 @@ class DownloadProgress:
         now = time.monotonic()
         stage = event['stage']
         task = (stage, event.get('filename'))
-        changed = task != self.task
+        changed = task != self.task or event.get('processed') == 0
         if changed:
             self.task, self.started = task, now
         finished = event.get('finished', False) or stage in ('reused', 'file_complete', 'complete', 'error', 'interrupted')
@@ -50,10 +50,11 @@ class DownloadProgress:
         prefix = f"[{event.get('completed_files', 0)}/{event.get('file_total', 6)} 完了]"
         filename = event.get('filename', '')
         labels = {'request': '接続中', 'validation': '検証中', 'transfer': 'ダウンロード中',
+                  'copy': 'Driveからコピー中', 'checksum': 'チェックサム照合中',
                   'reused': '検証OK・再利用', 'file_complete': '取得・検証完了',
                   'complete': '全ファイル準備完了', 'error': '失敗', 'interrupted': '中断'}
         text = f"{prefix} {labels.get(stage, stage)} {filename}"
-        if stage in ('transfer', 'validation'):
+        if stage in ('transfer', 'validation', 'copy', 'checksum'):
             percent = f'{100 * done / total:5.1f}%' if total else '  -- %'
             elapsed = max(0.0, now - self.started)
             speed = done / elapsed if elapsed else 0
@@ -427,3 +428,114 @@ def inspect_dataset():
     if splits['train'] & splits['val']:
         raise ValueError('Train/val overlap detected')
     return sizes, {split: len(ids) for split, ids in splits.items()}
+
+
+def _copy_checksum(path, name, progress=None):
+    """Read only an explicitly approved source/cache file; never expose its contents."""
+    import hashlib
+    digest = hashlib.sha256()
+    total = path.stat().st_size
+    processed = 0
+    _notify_progress(progress, stage='checksum', filename=name, processed=0, total=total, unit='bytes')
+    with open(path, 'rb') as handle:
+        while chunk := handle.read(1024**2):
+            digest.update(chunk)
+            processed += len(chunk)
+            _notify_progress(progress, stage='checksum', filename=name, processed=processed, total=total, unit='bytes')
+    _notify_progress(progress, stage='checksum', filename=name, processed=processed, total=total, unit='bytes', finished=True)
+    return digest.hexdigest()
+
+
+def copy_drive_dataset(source_dir, progress=None):
+    """Copy six private Drive cache files into the active runtime before processing.
+
+    Drive layout matches raw/archives and raw/annotations. Sources are read only;
+    all labels, images, training runs and temporary copy files stay in the runtime.
+    """
+    import hashlib
+    source_root = Path(source_dir).expanduser().absolute()
+    if source_root.resolve() != source_root:
+        raise ValueError('Drive dataset directory must not traverse symlinks')
+    if source_root == storage_root():
+        raise ValueError('Drive source and runtime destination must differ')
+    files = ARCHIVES + ANNOTATIONS
+    log_path = runtime_path(storage_root() / 'logs/drive_copy.jsonl')
+    context = {'attempt_id': uuid.uuid4().hex, 'stage': 'source_inventory'}
+    temporary = None
+    completed = 0
+    try:
+        sources = {}
+        for name in files:
+            relative = Path('raw') / ('archives' if name in ARCHIVES else 'annotations') / name
+            source = source_root / relative
+            if source_root not in source.resolve().parents:
+                raise ValueError('Drive source file escapes its dataset directory')
+            if not source.is_file():
+                raise FileNotFoundError(f'Missing Drive cache file: {name}')
+            sources[name] = source
+        required = sum(source.stat().st_size for name, source in sources.items() if not destination(name).exists())
+        if shutil.disk_usage(storage_root()).free < required + 2 * 1024**3:
+            raise OSError('Insufficient runtime space for Drive copy (plus 2 GiB reserve)')
+        _download_event(log_path, context, 'start', file_total=len(files), required_bytes=required)
+        records = []
+        for index, name in enumerate(files, 1):
+            source = sources[name]
+            target = runtime_path(destination(name))
+            runtime_path(target.parent).mkdir(parents=True, exist_ok=True)
+            current_progress = _file_progress(progress, index, completed, len(files))
+            context.update(stage='copy', filename=name, bytes_received=0, expected_bytes=source.stat().st_size)
+            if target.exists():
+                context['stage'] = 'existing_file_checksum'
+                source_hash = _copy_checksum(source, name, current_progress)
+                if _copy_checksum(target, name, current_progress) != source_hash:
+                    raise ValueError(f'Runtime file differs from Drive cache: {name}; remove the local file explicitly before retrying')
+                validate_file(target, name, progress=current_progress)
+                action = 'reused'
+            else:
+                temporary = runtime_path(target.with_suffix(target.suffix + '.copying'))
+                digest = hashlib.sha256()
+                _notify_progress(current_progress, stage='copy', filename=name, processed=0,
+                                 total=context['expected_bytes'], unit='bytes')
+                with open(source, 'rb') as incoming, open(temporary, 'wb') as outgoing:
+                    while chunk := incoming.read(1024**2):
+                        if shutil.disk_usage(storage_root()).free < len(chunk) + 1024**3:
+                            raise OSError('Insufficient runtime space during Drive copy')
+                        outgoing.write(chunk)
+                        digest.update(chunk)
+                        context['bytes_received'] += len(chunk)
+                        _notify_progress(current_progress, stage='copy', filename=name,
+                                         processed=context['bytes_received'], total=context['expected_bytes'], unit='bytes')
+                if context['bytes_received'] != context['expected_bytes']:
+                    raise ValueError('Drive source changed or copy was incomplete')
+                _notify_progress(current_progress, stage='copy', filename=name,
+                                 processed=context['bytes_received'], total=context['expected_bytes'], unit='bytes', finished=True)
+                source_hash = digest.hexdigest()
+                context['stage'] = 'copied_file_checksum'
+                if _copy_checksum(temporary, name, current_progress) != source_hash:
+                    raise ValueError('Drive copy checksum mismatch')
+                context['stage'] = 'copied_file_validation'
+                validate_file(temporary, name, progress=current_progress)
+                temporary.replace(target)
+                temporary = None
+                action = 'copied'
+            completed += 1
+            records.append({'filename': name, 'sha256': source_hash, 'action': action})
+            _download_event(log_path, context, action, sha256=source_hash, completed_files=completed)
+            _notify_progress(progress, stage='reused' if action == 'reused' else 'file_complete',
+                             filename=name, completed_files=completed, file_total=len(files))
+        manifest = runtime_path(storage_root() / 'raw/drive_copy_source.json')
+        manifest.write_text(json.dumps({'source_directory': str(source_root), 'files': records}, indent=2))
+        context['stage'] = 'complete'
+        _download_event(log_path, context, 'complete', completed_files=completed)
+        _notify_progress(progress, stage='complete', completed_files=completed, file_total=len(files))
+        return log_path
+    except (Exception, KeyboardInterrupt) as error:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        _download_event(log_path, context, 'interrupted' if isinstance(error, KeyboardInterrupt) else 'error',
+                        errors=_download_error_details(error))
+        _notify_progress(progress, stage='interrupted' if isinstance(error, KeyboardInterrupt) else 'error',
+                         filename=context.get('filename', ''), completed_files=completed, file_total=len(files))
+        if isinstance(error, KeyboardInterrupt):
+            raise
+        raise RuntimeError(f'Drive copy failed: {_safe_download_message(error)}. Log: {log_path}') from None

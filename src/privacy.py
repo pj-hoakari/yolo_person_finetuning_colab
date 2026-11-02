@@ -15,7 +15,7 @@ def storage_root():
 
 @contextlib.contextmanager
 def local_download_storage(directory):
-    """Explicit local-download scope; leave the notebook's default storage unchanged."""
+    """Explicit private cache scope for local/Drive storage; preserve the Colab default."""
     root = Path(directory).expanduser().absolute()
     if root.resolve() != root:
         raise ValueError('Local download directory must not traverse symlinks')

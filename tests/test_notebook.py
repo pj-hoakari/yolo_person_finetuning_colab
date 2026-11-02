@@ -26,6 +26,20 @@ class StandaloneNotebookTests(unittest.TestCase):
         headings = [''.join(c['source']) for c in notebook['cells'] if c['cell_type'] == 'markdown']
         self.assertEqual(len(headings), 19)
 
+    def test_drive_cache_is_copied_to_content_before_processing(self):
+        notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
+        sources = [''.join(cell['source']) for cell in notebook['cells'] if cell['cell_type'] == 'code']
+        config = next(source for source in sources if 'DRIVE_DATASET_DIR =' in source)
+        self.assertIn("'/content/drive/MyDrive/crowdhuman'", config)
+        acquisition = next(source for source in sources if 'def mount_dataset_drive' in source)
+        self.assertIn('drive.mount(mount_point)', acquisition)
+        self.assertIn('with local_download_storage(drive_dataset):', acquisition)
+        self.assertIn('copy_drive_dataset(drive_dataset', acquisition)
+        self.assertLess(acquisition.rindex('download_huggingface(HF_DATASET_REPO'), acquisition.rindex('copy_drive_dataset(drive_dataset'))
+        cleanup = sources[-1]
+        self.assertNotIn('DRIVE_DATASET_DIR', cleanup)
+        self.assertNotIn('drive_dataset', cleanup)
+
     def test_inline_synthetic_suite(self):
         notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
         # Execute only imports, definitions and literal constants. No Colab setup,

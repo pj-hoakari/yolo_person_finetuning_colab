@@ -32,9 +32,11 @@ vbox=可視人物、hbox=頭部、both=person/headの2クラスです。モデ�
 [公式配布・条件](https://www.crowdhuman.org/download.html) は非商用の研究・教育用途に限定し、画像再配布を禁止しています。
 [Ultralyticsライセンス](https://www.ultralytics.com/license) も確認してください。
 
-実データは `/content/crowdhuman/` だけに保存します。Google Driveはマウントしません。
+CrowdHumanの元ZIP・ODGTは非公開のGoogle Driveフォルダへ保存し、実行時に `/content/crowdhuman/` へコピーします。
+展開・変換・学習・評価はColabの一時ストレージで行います。Driveフォルダの共有リンクを公開しないでください。
 ColabはGoogleのクラウドです。利用条件でクラウド処理を認められない場合はこのノートブックを実行せず、ローカル用に別途移植してください。
-ランタイム終了・リセットでデータと重みが失われます。画像・アノテーションの表示、外部送信、出力保存は禁止します。
+ランタイム終了・リセットでColab上のコピーと重みが失われますが、Driveに保管した元ファイルは残ります。
+画像・アノテーションの表示・公開・再配布は行いません。
 Colabの「編集 → ノートブックの設定 → 保存時にコードセルの出力を除外する」を有効にしてください。
 このノートブック自身にも出力除外メタデータを設定しています。共有前に全出力を消してください。
 
@@ -76,7 +78,8 @@ print('インストール完了')''')
 初回は `DEBUG_MODE=True`、少ないepochで動作確認してください。正式比較ではFalseに戻し、別のRUN_NAMEを使います。
 `MODES_TO_RUN=["vbox", "hbox"]` で同じ設定の比較を一括実行できます。bothは2クラスです。
 利用条件とクラウド処理の可否を確認後に `TERMS_REVIEWED=True` にします。認証情報は入力しません。
-取得先はHugging Faceのsshao0516/CrowdHumanです。HF_DATASET_REVISIONに40桁のコミットSHAを指定してデータの版を固定します。
+Driveの保管先をDRIVE_DATASET_DIRに指定します。初回はHugging Faceから不足ファイルだけをDriveへ保存し、次回から再利用します。
+既に元ファイルをDriveへ配置した場合はDOWNLOAD_MISSING_TO_DRIVE=Falseにできます。HF_DATASET_REVISIONでデータの版を固定します。
 中断した同一実験だけ `RESUME=True` にします。設定・データ・依存バージョンが変わる再開は拒否します。''')
     code('''TRAIN_MODE = 'vbox'
 MODES_TO_RUN = [TRAIN_MODE]  # 比較例: ['vbox', 'hbox']; 3モード: ['vbox', 'hbox', 'both']
@@ -91,7 +94,9 @@ RUN_NAME = 'experiment'
 RESUME = False
 ALLOW_CPU = False
 TERMS_REVIEWED = False
-AUTO_DOWNLOAD = True
+DRIVE_MOUNT_POINT = '/content/drive'
+DRIVE_DATASET_DIR = '/content/drive/MyDrive/crowdhuman'
+DOWNLOAD_MISSING_TO_DRIVE = True
 HF_DATASET_REPO = 'sshao0516/CrowdHuman'
 HF_DATASET_REVISION = 'd97203da87e348ea69f7a7633a57c21a956120a6'
 EXPORT_ONNX = True
@@ -114,29 +119,34 @@ GitHubで管理する開発用srcとこのノートブックは、tools/build_no
 with local_console(BASE / 'setup.log'):
     YOLO = private_yolo()
 print('ランタイム内の保存先とプライバシー設定を準備しました')''')
-    md('''## 6. Hugging Faceから取得またはアップロード
-[sshao0516/CrowdHuman](https://huggingface.co/datasets/sshao0516/CrowdHuman)から、画像ZIP4個と元のODGT2個だけを取得します。
-ノートブックの設定でリポジトリとコミットSHAを指定できます。test用画像や変換済みラベルは取得しません。
-全6ファイルの完了数、処理中のファイル、ダウンロード／検証の進捗、速度と推定残り時間を1つの表示欄で更新します。
-標準HTTPで公開ファイルをraw/archives・raw/annotationsへ直接保存します。Hugging FaceのSDK・外部キャッシュ・ログインは使用しません。
-認証・アクセス制限・通信失敗があれば停止し、回避処理は行いません。その場合だけ、正規に取得した不足ファイルをアップロードします。
-AUTO_DOWNLOAD=Falseは自動取得不能を既に確認した場合の手動経路です。
-正常な既存ファイルは再取得しません。破損ファイルは確認のうえランタイム内から削除・交換してください。
-失敗理由は画面に短く表示し、日時・失敗段階・対象ファイル・HTTPステータス・転送量・例外とスタック位置を `/content/crowdhuman/logs/download.jsonl` に追記します。
-Colabのファイル欄からログを開けます。署名付きURL、認証情報、レスポンス本文やアノテーション内容は記録しません。
-Hugging Faceからの取得は、画像・アノテーションのアップロードや再配布を許可するものではありません。''')
-    code(inline_source('dataset.py') + '\n\n' + '''if not TERMS_REVIEWED:
-    raise RuntimeError('公式利用条件とColabでの処理可否を確認し、TERMS_REVIEWED=Trueにしてください。')
-if AUTO_DOWNLOAD:
-    try:
-        download_log = download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION, progress=DownloadProgress(notebook=True))
-        print('必要ファイルを取得・再利用しました。ログ:', download_log)
-    except RuntimeError as error:
-        print(str(error))
-        print('上記のログを確認してください。正規取得した不足ファイルは以下からアップロードできます。')
-        upload_missing()
-else:
-    upload_missing()''')
+    md('''## 6. Google Driveへ保管し、/contentへコピー
+Google Driveをマウントし、非公開の `MyDrive/crowdhuman/` に元の画像ZIP4個とODGT2個を保管します。
+初回は[sshao0516/CrowdHuman](https://huggingface.co/datasets/sshao0516/CrowdHuman)から不足分だけをDriveへ取得します。
+既にファイルがある場合は `raw/archives/` にZIP、`raw/annotations/` にODGTを配置してください。
+次に6ファイルを `/content/crowdhuman/raw/` へコピーし、SHA-256・ZIP CRC・ODGT形式を確認します。
+同じセッション内の正常なローカルコピーはDriveと一致すれば再利用します。内容の異なるローカルファイルは無言で上書きしません。
+コピー・照合・検証の進捗は1つの表示欄に出力します。取得ログはDrive側の `logs/download.jsonl`、コピーログはColab側の `logs/drive_copy.jsonl` に保存します。
+画像展開・ラベル変換・学習はこの後のセルでローカルコピーに対して実行します。共有・公開や外部追跡への送信は行いません。''')
+    code(inline_source('dataset.py') + '\n\n' + '''def mount_dataset_drive(mount_point):
+    from google.colab import drive
+    drive.mount(mount_point)
+
+if not TERMS_REVIEWED:
+    raise RuntimeError('利用条件とGoogle Drive・Colabでの保存・処理可否を確認し、TERMS_REVIEWED=Trueにしてください。')
+mount_dataset_drive(DRIVE_MOUNT_POINT)
+drive_dataset = Path(DRIVE_DATASET_DIR)
+mount_root = Path(DRIVE_MOUNT_POINT).absolute()
+if mount_root not in drive_dataset.absolute().parents:
+    raise ValueError('DRIVE_DATASET_DIRはマウントしたGoogle Drive配下を指定してください。')
+if DOWNLOAD_MISSING_TO_DRIVE:
+    with local_download_storage(drive_dataset):
+        for part in ('raw/archives', 'raw/annotations', 'logs'):
+            runtime_path(drive_dataset / part).mkdir(parents=True, exist_ok=True)
+        drive_log = download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION,
+                                         progress=DownloadProgress(notebook=True))
+        print('Driveへの保管完了。取得ログ:', drive_log)
+copy_log = copy_drive_dataset(drive_dataset, progress=DownloadProgress(notebook=True))
+print('Colabへのコピー・検証完了。ログ:', copy_log)''')
     md('''## 7. ファイル整合性・空き容量確認
 必須6ファイル、全ZIPのCRC、ODGT構造とCrowdHumanの件数(train 15,000 / val 4,370)を確認します。
 データの内容や画像IDは表示せず件数だけを出力します。展開前に非圧縮サイズと空き容量も確認します。''')
@@ -240,7 +250,8 @@ else:
 学習済みモデルの取得を確認してから実行してください。初期状態では削除しません。
 DELETE_DATA=Trueはrawとprocessedを削除します。DELETE_RUNS=Trueはチェックポイントと学習ログも削除し、再開できなくなります。
 DEBUGから本番へ切り替える際は、DELETE_DATAを使うとrawも消えます。rawを再利用する場合はColabファイル欄でprocessed/<mode>だけを明示的に削除し、新しいRUN_NAMEで変換・学習してください。
-exportsは残ります。ランタイムのリセットではexportsも含めて消失します。''')
+exportsは残ります。ランタイムのリセットではexportsも含めて消失します。
+このセルはDriveの保管フォルダを削除しません。次のランタイムではDriveから再コピーできます。''')
     code('''DELETE_DATA = False
 DELETE_RUNS = False
 import shutil

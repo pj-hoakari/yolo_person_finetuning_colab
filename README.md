@@ -1,6 +1,6 @@
 # CrowdHumanを用いたYOLO追加学習
 
-Google Colabの一時ストレージだけでCrowdHumanを取得・変換し、YOLO26nの追加学習と評価を行います。`crowdhuman_finetuning.ipynb` をColabで開き、設定を確認して上から実行します。全処理と合成テストは、ノートブック内の通常のPythonセルとして収めています。外部のsrcファイルやテストファイルの取得・生成は不要です。
+CrowdHumanの元ZIP・ODGTを非公開のGoogle Driveフォルダに保管し、Colabの `/content/crowdhuman/` へコピーしてから変換・追加学習・評価を行います。`crowdhuman_finetuning.ipynb` をColabで開き、設定を確認して上から実行します。全処理と合成テストは、ノートブック内の通常のPythonセルとして収めています。外部のsrcファイルやテストファイルの取得・生成は不要です。
 
 [Colabで開く](https://colab.research.google.com/github/pj-hoakari/yolo_person_finetuning_colab/blob/main/crowdhuman_finetuning.ipynb)
 
@@ -25,7 +25,7 @@ Google Colabの一時ストレージだけでCrowdHumanを取得・変換し、Y
 |---|---|---|
 | モデル | yolo26n.pt（sへ変更可） | 同じモデルを優先 |
 | データ | personに絞ったCOCO YOLO ZIP | 公式CrowdHuman ODGTを3モードへ変換 |
-| 保存先 | DriveとColab SSD | `/content/crowdhuman/`のみ |
+| 保存先 | DriveとColab SSD | 元ZIP・ODGTは非公開Drive、処理は`/content/crowdhuman/` |
 | 初期設定 | 300 epoch / batch 32 / 640 | 50 epoch / batch 16 / 640 |
 | 学習設定 | patience 10、cos_lr、close_mosaic、shear/perspective 0、AMP | 継承。cacheはFalse、workersは2、seed固定 |
 | クラス | single_cls=True | bothを維持できるようFalse |
@@ -57,16 +57,16 @@ requirements.txt
 ## Colabの使い方
 
 1. ノートブックをColabへアップロードし、GPUランタイムを選びます。「編集 → ノートブックの設定 → 保存時にコードセルの出力を除外する」も有効にします。共有前に全出力を削除してください。
-2. セル2〜5で環境・依存・学習設定を準備します。利用条件・Colabでの処理可否を確認後、設定セルの`TERMS_REVIEWED=True`にします。認証情報はコードへ入力しません。
+2. セル2〜5で環境・依存・学習設定を準備します。`DRIVE_DATASET_DIR`にDrive保管先を指定します。Google Driveへの保存・Colabでの処理が利用条件に適合することを確認し、`TERMS_REVIEWED=True`にします。認証トークンはコードへ記述しません。
 3. 最初は`DEBUG_MODE=True`、`EPOCHS=1`、必要に応じてbatchを下げて確認します。DEBUGは各splitの先頭`DEBUG_LIMIT`画像を使います。全モードで同じ画像を選びます。ダウンロード容量・入力全体の検証量は減りません。
-4. セル6〜12で取得・展開・画像検証・変換・合成テストを実行します。画像IDやアノテーション自体は出力しません。
+4. セル6でDriveをマウントし、不足する元ファイルをHugging FaceからDriveへ保存して、`/content/crowdhuman/raw/`へコピーします。セル7〜12で検証・展開・変換・合成テストを実行します。画像IDやアノテーション自体は出力しません。
 5. セル13〜17でモデル準備、学習、評価、比較、モデル出力を行います。GPUがない場合は警告して停止します。意図的なCPUテストだけ`ALLOW_CPU=True`を指定できます。
 6. セル18で`DOWNLOAD_NAMES`に必要なファイルを列挙し、`DO_DOWNLOAD=True`としてそのセルを明示実行します。
 7. 必要な重みの取得を確認後、セル19の削除フラグを必要なものだけ有効にします。
 
-**ランタイム終了・リセットで、画像、ラベル、ログ、チェックポイント、exportsも失われます。** Driveへの自動保存はありません。ノートブックの保存は学習済み重みの保存にはなりません。
+**ランタイム終了・リセットで、Colab内のコピー、展開画像、ラベル、ログ、チェックポイント、exportsは失われます。** Driveに保管した元ZIP・ODGTは残るため、次回はDriveから再コピーできます。学習済み重みは自動でDriveへ保存しないため、必要なものをセル18で取得してください。セル19の削除対象もColab側だけです。
 
-### Hugging Faceからの取得と手動フォールバック
+### Google Driveへの保管とColabへのコピー
 
 必要なファイルは次の6つです。
 
@@ -78,15 +78,41 @@ requirements.txt
 
 設定セルの`HF_DATASET_REPO`と`HF_DATASET_REVISION`で取得先を指定します。revisionには40桁のコミットSHAを指定します。変更する場合も、同じ6ファイルが揃い、利用が認められる配布元を使ってください。test用ZIPや変換済みの第三者ラベルは取得しません。vbox/hbox/ignoreは元のODGTから処理します。
 
-標準HTTPSの公開resolve URLから、`/content/crowdhuman/raw/archives/`と`raw/annotations/`へ直接ストリーミング保存します。Hugging FaceのSDK・認証トークン・外部キャッシュは使用しません。通常のHTTPSリダイレクトには対応しますが、認証・アクセス制限・確認画面の回避処理はありません。取得したファイルと再利用したファイルは`raw/download_source.json`に記録します。実データのネットワーク取得は開発環境では未検証です。
+設定の既定値は次のとおりです。
 
-自動取得に失敗した場合だけ、正規に入手したファイルをColabのアップロードUIで配置します。自動取得不能を既に確認した場合は`AUTO_DOWNLOAD=False`で手動経路に入れます。大容量ZIPのブラウザアップロードはRAMを使うため、必要なら1つずつアップロードしてセルを再実行してください。アップロード対象を間違えないでください。
+```python
+DRIVE_MOUNT_POINT = '/content/drive'
+DRIVE_DATASET_DIR = '/content/drive/MyDrive/crowdhuman'
+DOWNLOAD_MISSING_TO_DRIVE = True
+```
 
-アップロード中のファイルは`raw/`に置かれ、検証後にarchives/annotationsへ移動します。正常な既存ファイルは再ダウンロードしません。既存ファイルが破損している場合は停止し、無言で置換しません。Colabのファイル欄で破損した対象を明示的に削除・交換して再実行します。
+初回実行時はセル6でDriveの認証画面に従ってマウントします。Hugging Faceの公開resolve URLから必要な6ファイルをDriveへ直接取得します。Hugging FaceのSDKやトークンは使いません。認証・アクセス制限の回避処理もありません。正常な既存ファイルは再ダウンロードしません。
+
+既にローカルへ取得したファイルがある場合は、Google DriveのWeb画面などから、次の非公開フォルダへ配置してください。共有リンクは公開しないでください。配置済みなら`DOWNLOAD_MISSING_TO_DRIVE=False`にするとネットワーク取得を行いません。
+
+```text
+MyDrive/crowdhuman/
+├── raw/
+│   ├── archives/
+│   │   ├── CrowdHuman_train01.zip
+│   │   ├── CrowdHuman_train02.zip
+│   │   ├── CrowdHuman_train03.zip
+│   │   └── CrowdHuman_val.zip
+│   └── annotations/
+│       ├── annotation_train.odgt
+│       └── annotation_val.odgt
+└── logs/download.jsonl
+```
+
+6ファイルが揃った後で、Colabの`/content/crowdhuman/raw/`へコピーします。転送量、SHA-256照合、ZIP CRC・ODGT検証の進捗を表示します。コピーは一時ファイルに行い、照合・検証に成功してから確定します。失敗時の不完全コピーは削除します。空き容量はコピーに必要な量と2 GiBの予約領域を要求し、展開前にも別途確認します。
+
+同じColabセッションの再実行ではDriveとローカルのSHA-256が一致し、検証を通過したファイルを再利用します。異なるローカルファイルは上書きせず停止します。ログを確認して対象のColab側ファイルを明示削除し、再コピーしてください。Driveの元ファイルはコピー処理で変更・削除しません。
+
+展開画像、YOLOラベル、学習・評価結果はColab内で扱います。元ファイルをDriveに保管することは、画像・アノテーションの公開や再配布を許可するものではありません。
 
 ### 実CrowdHumanをローカルへダウンロードする
 
-ノートブックの既定保存先はColabのままです。ローカルで実ファイルを取得する場合は、リポジトリのルートで次を実行します。Python標準ライブラリだけで動作し、GPUや追加パッケージは不要です。取得前に前述のデータ利用条件を確認してください。
+ノートブックはDrive保管・Colab処理が既定です。別途、ローカルで実ファイルを取得する場合は、リポジトリのルートで次を実行します。Python標準ライブラリだけで動作し、GPUや追加パッケージは不要です。取得前に前述のデータ利用条件を確認してください。
 
 ```bash
 python3 tools/download_crowdhuman.py
@@ -110,11 +136,11 @@ TTYでは同じ行を更新し、非TTYでは約1秒間隔と処理段階の変�
 
 ### ダウンロード失敗時のログ
 
-セル6はエラーを一律のメッセージで隠さず、例外の種類・短い理由とログの保存先を表示します。詳細ログは `/content/crowdhuman/logs/download.jsonl` です。Colab左側のファイル欄で `crowdhuman → logs → download.jsonl` を開いてください。失敗理由を記録するには、更新したノートブックのセル6を再実行してください。過去の失敗をさかのぼって復元することはできません。
+セル6で、Hugging Face取得のログはDriveの`MyDrive/crowdhuman/logs/download.jsonl`へ、DriveからColabへのコピーログは`/content/crowdhuman/logs/drive_copy.jsonl`へ保存します。エラー画面にもログの場所を表示します。Colabのファイル欄から開けます。失敗理由を記録するには、更新したセル6を再実行してください。過去の失敗は復元できません。ローカル取得CLIのログは引き続き`crowdhuman/logs/download.jsonl`です。
 
 JSON Lines形式で、UTC日時・試行ID・処理段階・対象ファイル・HTTPステータス・受信先ホスト・転送量・想定サイズ・空き容量・例外の種類と理由・スタック位置を追記します。HTTP 403等は例外内の`http_status`、DNSエラーは`reason`、転送不足は`bytes_received`と`expected_bytes`、既存ファイル破損は`stage=existing_file_validation`を確認します。64 MiBごとの進捗、再利用、完了、中断も記録するため、同じセッションの再実行を試行IDで区別できます。
 
-署名付きURL・認証情報・全レスポンスヘッダ・レスポンス本文・画像・アノテーション内容・ローカル変数は記録しません。スタックはファイル名、行番号、関数名だけです。ログの書き込み自体が失敗した場合は、その理由も画面に表示します。ログはランタイム内に留め、Git管理や外部送信はしません。ランタイムをリセットするとログも失われます。
+署名付きURL・認証情報・全レスポンスヘッダ・レスポンス本文・画像・アノテーション内容・ローカル変数は記録しません。スタックはファイル名、行番号、関数名だけです。ログの書き込み自体が失敗した場合は、その理由も画面に表示します。ログは指定した非公開DriveフォルダまたはColabの保存先に留め、Git管理や外部追跡への送信はしません。Colab側のログはランタイムのリセットで失われます。
 
 ### ランタイム内の構成
 
@@ -176,7 +202,7 @@ ONNXはopset 13、dynamic、FP32、simplify=Falseで出力します。`onnx.chec
 
 ## プライバシーとGit
 
-ノートブックの実データ保存先は`/content/crowdhuman/`配下に制限します。明示的なローカル取得CLIだけは、Git管理対象外のリポジトリ直下`crowdhuman/`を使用します。範囲外へのsymlinkも拒否します。Driveマウント、Hubアップロード、外部画像API、GitHub Releases/Artifacts/Actionsへの保存処理はありません。同期・外部実験追跡を設定で無効にし、HUB/Platform/analytics等のintegration callback登録も停止します。学習・検証のplot、画像表示、予測画像保存を使いません。大量ログはランタイム内のconsole.log等に保存し、ノートブックには要約だけを表示します。
+ノートブックは元ZIP・ODGTを指定した非公開Driveフォルダへ保存し、処理対象は`/content/crowdhuman/`配下のコピーに制限します。明示的なローカル取得CLIだけは、Git管理対象外のリポジトリ直下`crowdhuman/`を使用します。範囲外へのsymlinkも拒否します。Driveのマウントと元ファイルの保管・読み取りを行います。Hubアップロード、外部画像API、GitHub Releases/Artifacts/Actionsへの保存処理はありません。同期・外部実験追跡を設定で無効にし、HUB/Platform/analytics等のintegration callback登録も停止します。学習・検証のplot、画像表示、予測画像保存を使いません。大量ログはランタイム内のconsole.log等に保存し、ノートブックには要約だけを表示します。
 
 これはOSのネットワーク遮断ではありません。パッケージ・公式重み・Hugging Face上のCrowdHumanの取得にはネットワークを使います。ユーザーが別途外部連携を有効にしないでください。ノートブックを共有する前に、出力除去とステージ済みファイルを確認してください。
 
@@ -201,7 +227,7 @@ python3 tools/smoke_training.py --onnx-check
 
 実施済みの検証:
 
-- 合成データによる67件の自動テストが成功。進捗の完了数・表示頻度・サイズ不明時の表示・Colabの表示更新と、進捗付きCRC検証による破損検出も確認しました。CrowdHuman形式のカンマ入り画像IDの解析・3モード変換と、危険なIDの拒否も確認しました。ローカル取得先の分離、例外時の保存先復帰、symlink拒否も確認しました。HTTP 403・DNS失敗・既存ファイル破損・転送不足・中断・ログ書込失敗の診断、追記、秘密情報の除去も確認しました。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
+- 合成データによる75件の自動テストが成功。Driveを模したフォルダからのコピー、再利用、SHA-256不一致、CRC破損、不足ファイル、容量不足、symlink拒否とノートブックのDrive→Colab処理順も確認しました。進捗の完了数・表示頻度・サイズ不明時の表示・Colabの表示更新と、進捗付きCRC検証による破損検出も確認しました。CrowdHuman形式のカンマ入り画像IDの解析・3モード変換と、危険なIDの拒否も確認しました。ローカル取得先の分離、例外時の保存先復帰、symlink拒否も確認しました。HTTP 403・DNS失敗・既存ファイル破損・転送不足・中断・ログ書込失敗の診断、追記、秘密情報の除去も確認しました。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
 - Ultralytics 8.4.52 / PyTorch 2.12.0+cu130のCPUで、独自作成した合成画像とランダム初期化YOLO26による3モード各1 epochの学習、評価、PT/CSV出力、比較CSV生成が成功しました。学習出力に画像ファイルが生成されないことも確認しました。これは公式事前学習重みからのFine-tuningや実精度の検証ではありません。
 - ランダム重みのYOLO26をopset 13・dynamic・FP32のONNXへ出力し、onnx.checkerが成功しました。
 - Pythonとノートブック全コードセルの構文、埋め込みソースの一致、出力が空であること、Git差分の空白エラーと管理対象を確認しました。
@@ -209,7 +235,7 @@ python3 tools/smoke_training.py --onnx-check
 未検証:
 
 - Colabの実GPU、公式事前学習重みの取得、CrowdHuman実ファイルのダウンロード・展開・学習。実画像・実ODGTは開発環境へ取得していません。
-- Colabの大容量アップロードUIとfiles.downloadの実操作、実GPUのcheckpointからの再開。再開分岐と設定変更拒否はモックによるテストです。
+- Google Driveの実マウント、実データのDrive保管・Colabへのコピー、files.downloadの実操作、実GPUのcheckpointからの再開。再開分岐と設定変更拒否はモックによるテストです。
 - ONNX Runtime実推論（開発環境に未導入）、ONNX Runtime Web、既存Webアプリ・追跡器との入出力互換性。ColabにはRuntimeをインストールし、エクスポート時の合成推論検査を実装しています。
 
 GitHubへ反映する前に差分を確認し、以下でコミットします。データ・モデルは管理対象に含めないでください。

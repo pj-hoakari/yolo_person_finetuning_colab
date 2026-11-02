@@ -510,6 +510,89 @@ class SyntheticRuntime(unittest.TestCase):
         handle.update.assert_called_once()
         self.assertIn('100.0%', handle.update.call_args.args[0])
 
+    def prepare_drive_cache(self):
+        self.archives()
+        source_root = self.base / 'drive_cache'
+        for name in dataset.ARCHIVES + dataset.ANNOTATIONS:
+            original = dataset.destination(name)
+            target = source_root / original.relative_to(self.base)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(original.read_bytes())
+            original.unlink()
+        return source_root
+
+    def test_drive_copy_and_reuse_without_network(self):
+        source = self.prepare_drive_cache()
+        originals = {p.relative_to(source): p.read_bytes() for p in source.rglob('*') if p.is_file()}
+        events = []
+        with patch.object(dataset.urllib.request, 'urlopen', side_effect=AssertionError('copy must not use network')):
+            log = dataset.copy_drive_dataset(source, progress=events.append)
+            timestamps = {name: dataset.destination(name).stat().st_mtime_ns for name in dataset.ARCHIVES + dataset.ANNOTATIONS}
+            dataset.copy_drive_dataset(source)
+        self.assertEqual(log, self.base / 'logs/drive_copy.jsonl')
+        manifest = json.loads((self.base / 'raw/drive_copy_source.json').read_text())
+        self.assertEqual(len(manifest['files']), 6)
+        self.assertTrue(all(row['action'] == 'reused' for row in manifest['files']))
+        for relative, data in originals.items():
+            self.assertEqual((source / relative).read_bytes(), data)
+            self.assertEqual((self.base / relative).read_bytes(), data)
+        self.assertEqual({name: dataset.destination(name).stat().st_mtime_ns for name in timestamps}, timestamps)
+        self.assertTrue({'copy', 'checksum', 'validation', 'complete'} <= {event['stage'] for event in events})
+        self.assertEqual(events[-1]['completed_files'], 6)
+
+    def test_drive_copy_missing_file_does_not_partially_copy(self):
+        source = self.prepare_drive_cache()
+        (source / 'raw/annotations/annotation_val.odgt').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'Missing Drive cache file'):
+            dataset.copy_drive_dataset(source)
+        self.assertFalse(any(dataset.destination(name).exists() for name in dataset.ARCHIVES + dataset.ANNOTATIONS))
+
+    def test_drive_copy_corruption_leaves_no_final_or_temporary_file(self):
+        source = self.prepare_drive_cache()
+        archive = source / 'raw/archives/CrowdHuman_train01.zip'
+        archive.write_bytes(b'synthetic-invalid-archive')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid ZIP'):
+            dataset.copy_drive_dataset(source)
+        self.assertEqual(archive.read_bytes(), b'synthetic-invalid-archive')
+        self.assertFalse(dataset.destination(archive.name).exists())
+        self.assertFalse(list((self.base / 'raw').rglob('*.copying')))
+        entry = json.loads((self.base / 'logs/drive_copy.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(entry['stage'], 'copied_file_validation')
+
+    def test_drive_copy_different_local_file_is_not_overwritten(self):
+        source = self.prepare_drive_cache()
+        target = dataset.destination('CrowdHuman_train01.zip')
+        with zipfile.ZipFile(target, 'w') as archive:
+            archive.writestr('Images/synthetic_other.jpg', b'synthetic-other-image')
+        before = target.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'differs from Drive cache'):
+            dataset.copy_drive_dataset(source)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_drive_copy_disk_space_check(self):
+        source = self.prepare_drive_cache()
+        with patch.object(dataset.shutil, 'disk_usage', return_value=SimpleNamespace(free=1)):
+            with self.assertRaisesRegex(RuntimeError, 'Insufficient runtime space'):
+                dataset.copy_drive_dataset(source)
+        self.assertFalse(list((self.base / 'raw').rglob('*.copying')))
+
+    def test_drive_copy_rejects_source_symlink_escape(self):
+        source = self.prepare_drive_cache()
+        target = source / 'raw/archives/CrowdHuman_train01.zip'
+        target.unlink()
+        outside = self.base / 'outside.zip'
+        outside.write_bytes(b'synthetic-outside')
+        target.symlink_to(outside)
+        with self.assertRaisesRegex(RuntimeError, 'escapes its dataset directory'):
+            dataset.copy_drive_dataset(source)
+
+    def test_drive_copy_reports_checksum_mismatch(self):
+        source = self.prepare_drive_cache()
+        with patch.object(dataset, '_copy_checksum', return_value='incorrect-hash'):
+            with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+                dataset.copy_drive_dataset(source)
+        self.assertFalse(list((self.base / 'raw').rglob('*.copying')))
+
     def test_runtime_boundary_and_symlink(self):
         with self.assertRaises(ValueError):
             privacy.runtime_path(self.base.parent / 'outside')
