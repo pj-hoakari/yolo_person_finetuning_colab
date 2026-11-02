@@ -435,6 +435,81 @@ class SyntheticRuntime(unittest.TestCase):
         self.assertEqual(entry['stage'], 'configuration')
         self.assertNotIn('synthetic-secret', json.dumps(entry))
 
+    def test_progress_reports_existing_validation_and_six_reused_files(self):
+        self.archives()
+        events = []
+        with patch.object(dataset.urllib.request, 'urlopen', side_effect=AssertionError('must reuse')):
+            dataset.download_huggingface(progress=events.append)
+        self.assertEqual([event['completed_files'] for event in events if event['stage'] == 'reused'], list(range(1, 7)))
+        self.assertEqual(events[-1]['stage'], 'complete')
+        self.assertEqual(events[-1]['completed_files'], 6)
+        checks = [event for event in events if event['stage'] == 'validation' and event.get('finished')]
+        self.assertEqual(len(checks), 6)
+        self.assertTrue(all(event['processed'] == event['total'] for event in checks))
+        self.assertEqual({event['unit'] for event in checks}, {'bytes', 'records'})
+
+    def test_progress_reports_download_with_unknown_size(self):
+        self.prepare_download_failure()
+        payload = json.dumps({'ID': 'synthetic,001', 'gtboxes': []}).encode()
+        response = io.BytesIO(payload)
+        response.headers = {'Content-Type': 'application/octet-stream'}
+        events = []
+        with patch.object(dataset.urllib.request, 'urlopen', return_value=response):
+            dataset.download_huggingface(progress=events.append)
+        transfers = [event for event in events if event['stage'] == 'transfer']
+        self.assertEqual(transfers[-1]['processed'], len(payload))
+        self.assertEqual(transfers[-1]['total'], 0)
+        self.assertTrue(transfers[-1]['finished'])
+        self.assertEqual(events[-1]['completed_files'], 6)
+        self.assertTrue(any(event['stage'] == 'file_complete' for event in events))
+
+    def test_streamed_zip_validation_detects_bad_crc(self):
+        self.archives()
+        path = dataset.destination('CrowdHuman_train01.zip')
+        with zipfile.ZipFile(path) as archive:
+            entry = archive.infolist()[0]
+            offset = entry.header_offset + 30 + len(entry.filename.encode()) + len(entry.extra)
+        data = bytearray(path.read_bytes())
+        data[offset] ^= 1
+        path.write_bytes(data)
+        with self.assertRaises(ValueError):
+            dataset.validate_file(path, path.name, progress=lambda event: None)
+
+    def test_console_progress_throttles_and_finishes(self):
+        stream = io.StringIO()
+        display = dataset.DownloadProgress(stream=stream, interval=1)
+        common = {'stage': 'transfer', 'filename': 'CrowdHuman_val.zip', 'completed_files': 4,
+                  'file_total': 6, 'total': 3 * 1024**2, 'unit': 'bytes'}
+        with patch.object(dataset.time, 'monotonic', side_effect=[0, .25, 1.5, 2]):
+            for index in range(4):
+                display({**common, 'processed': index * 1024**2, 'finished': index == 3})
+        lines = stream.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn('[4/6 完了]', lines[-1])
+        self.assertIn('100.0%', lines[-1])
+        self.assertIn('MiB/s', lines[-1])
+        self.assertIn('残り 00:00', lines[-1])
+
+    def test_console_progress_handles_unknown_length(self):
+        stream = io.StringIO()
+        display = dataset.DownloadProgress(stream=stream)
+        display({'stage': 'transfer', 'filename': 'annotation_val.odgt',
+                 'processed': 1024, 'total': 0, 'finished': True})
+        self.assertIn('-- %', stream.getvalue())
+        self.assertIn('残り --:--', stream.getvalue())
+
+    def test_notebook_progress_updates_one_display(self):
+        handle, show = Mock(), Mock()
+        show.return_value = handle
+        ipython = SimpleNamespace(HTML=lambda text: text, display=show)
+        display = dataset.DownloadProgress(notebook=True)
+        with patch.dict('sys.modules', {'IPython.display': ipython}):
+            display({'stage': 'transfer', 'filename': 'CrowdHuman_val.zip', 'processed': 0, 'total': 100})
+            display({'stage': 'transfer', 'filename': 'CrowdHuman_val.zip', 'processed': 100, 'total': 100, 'finished': True})
+        show.assert_called_once()
+        handle.update.assert_called_once()
+        self.assertIn('100.0%', handle.update.call_args.args[0])
+
     def test_runtime_boundary_and_symlink(self):
         with self.assertRaises(ValueError):
             privacy.runtime_path(self.base.parent / 'outside')

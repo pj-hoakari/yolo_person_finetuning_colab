@@ -11,13 +11,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from src.privacy import local_download_storage, runtime_path
-from src.dataset import HF_REPO_ID, HF_REVISION, download_huggingface, inventory
+from src.dataset import HF_REPO_ID, HF_REVISION, download_huggingface, inventory, DownloadProgress
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo-id', default=HF_REPO_ID)
     parser.add_argument('--revision', default=HF_REVISION)
+    parser.add_argument('--quiet', action='store_true', help='disable live progress; diagnostic logs are still saved')
     args = parser.parse_args()
     root = PROJECT_ROOT / 'crowdhuman'
     ignored = subprocess.run(['git', '-C', str(PROJECT_ROOT), 'check-ignore', '-q', '--',
@@ -31,8 +32,10 @@ def main():
         print(f'Source: {args.repo_id} @ {args.revision}', flush=True)
         print('Downloading archives and annotations only; no extraction or training.', flush=True)
         try:
-            log = download_huggingface(args.repo_id, args.revision)
-            report = inventory()
+            progress = None if args.quiet else DownloadProgress()
+            log = download_huggingface(args.repo_id, args.revision, progress=progress)
+            print('Final integrity verification:', flush=True)
+            report = inventory(progress=progress)
         except (RuntimeError, ValueError, OSError) as error:
             print(str(error), file=sys.stderr, flush=True)
             return 1

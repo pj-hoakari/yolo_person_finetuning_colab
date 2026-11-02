@@ -117,6 +117,7 @@ print('ランタイム内の保存先とプライバシー設定を準備しま�
     md('''## 6. Hugging Faceから取得またはアップロード
 [sshao0516/CrowdHuman](https://huggingface.co/datasets/sshao0516/CrowdHuman)から、画像ZIP4個と元のODGT2個だけを取得します。
 ノートブックの設定でリポジトリとコミットSHAを指定できます。test用画像や変換済みラベルは取得しません。
+全6ファイルの完了数、処理中のファイル、ダウンロード／検証の進捗、速度と推定残り時間を1つの表示欄で更新します。
 標準HTTPで公開ファイルをraw/archives・raw/annotationsへ直接保存します。Hugging FaceのSDK・外部キャッシュ・ログインは使用しません。
 認証・アクセス制限・通信失敗があれば停止し、回避処理は行いません。その場合だけ、正規に取得した不足ファイルをアップロードします。
 AUTO_DOWNLOAD=Falseは自動取得不能を既に確認した場合の手動経路です。
@@ -128,7 +129,7 @@ Hugging Faceからの取得は、画像・アノテーションのアップロ�
     raise RuntimeError('公式利用条件とColabでの処理可否を確認し、TERMS_REVIEWED=Trueにしてください。')
 if AUTO_DOWNLOAD:
     try:
-        download_log = download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION)
+        download_log = download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION, progress=DownloadProgress(notebook=True))
         print('必要ファイルを取得・再利用しました。ログ:', download_log)
     except RuntimeError as error:
         print(str(error))
@@ -139,7 +140,7 @@ else:
     md('''## 7. ファイル整合性・空き容量確認
 必須6ファイル、全ZIPのCRC、ODGT構造とCrowdHumanの件数(train 15,000 / val 4,370)を確認します。
 データの内容や画像IDは表示せず件数だけを出力します。展開前に非圧縮サイズと空き容量も確認します。''')
-    code('''print(inventory())''')
+    code('''print(inventory(progress=DownloadProgress(notebook=True)))''')
     md('''## 8. ZIPの安全な解凍
 raw/imagesに1組だけ展開します。想定外のパス・シンボリックリンク・重複画像を拒否します。
 既存画像はCRCが一致すれば再展開しません。画像・アノテーションはすべてランタイム内に留まります。''')
