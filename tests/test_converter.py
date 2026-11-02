@@ -236,25 +236,61 @@ class SyntheticRuntime(unittest.TestCase):
     def test_download_reuses_existing_without_network(self):
         self.archives()
         with patch.object(dataset.urllib.request, 'urlopen', side_effect=AssertionError('Network must not be called')):
-            dataset.download_official()
+            dataset.download_huggingface()
 
-    def test_official_link_parser(self):
-        html = '\n'.join(f'{name} <a href="https://drive.google.com/file/d/official_{i}/view">Google Drive</a>' for i, name in enumerate(dataset.ARCHIVES + dataset.ANNOTATIONS))
-        with patch.object(dataset.urllib.request, 'urlopen', return_value=io.BytesIO(html.encode())):
-            links = dataset.official_links()
-        self.assertEqual(len(links), 6)
-        self.assertIn('id=official_0', links['CrowdHuman_train01.zip'])
+    def test_huggingface_links_pin_original_files(self):
+        links = dataset.huggingface_links()
+        self.assertEqual(set(links), set(dataset.ARCHIVES + dataset.ANNOTATIONS))
+        for name, url in links.items():
+            self.assertEqual(url, f'https://huggingface.co/datasets/{dataset.HF_REPO_ID}/resolve/{dataset.HF_REVISION}/{name}?download=true')
+        self.assertNotIn('CrowdHuman_test.zip', links)
+
+    def test_huggingface_source_validation(self):
+        for repo, revision in (('../unsafe', dataset.HF_REVISION), ('org/repo?token=x', dataset.HF_REVISION), (dataset.HF_REPO_ID, 'main'), (dataset.HF_REPO_ID, '../main')):
+            with self.assertRaises(ValueError):
+                dataset.huggingface_links(repo, revision)
 
     def test_download_rejects_html_and_cleans_partial(self):
         dataset.destination('annotation_train.odgt').unlink()
         self.archives()
         response = io.BytesIO(b'<html>login</html>')
         response.headers = {'Content-Type': 'text/html'}
-        with patch.object(dataset, 'official_links', return_value={'annotation_train.odgt': 'https://drive.google.com/uc?id=official'}), patch.object(dataset.urllib.request, 'urlopen', return_value=response):
-            with self.assertRaisesRegex(RuntimeError, 'Download failed'):
-                dataset.download_official()
+        with patch.object(dataset, 'huggingface_links', return_value={'annotation_train.odgt': 'https://huggingface.co/datasets/owner/repo/resolve/revision/annotation_train.odgt'}), patch.object(dataset.urllib.request, 'urlopen', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'Hugging Face download failed'):
+                dataset.download_huggingface()
         self.assertFalse(dataset.destination('annotation_train.odgt').exists())
         self.assertEqual(list((self.base / 'raw/annotations').glob('*.part')), [])
+
+    def test_huggingface_download_validates_and_records_source(self):
+        self.archives()
+        name = 'annotation_train.odgt'
+        destination = dataset.destination(name)
+        payload = destination.read_bytes()
+        destination.unlink()
+        response = io.BytesIO(payload)
+        response.headers = {'Content-Type': 'application/octet-stream', 'Content-Length': str(len(payload))}
+        with patch.object(dataset.urllib.request, 'urlopen', return_value=response) as request:
+            dataset.download_huggingface()
+        self.assertEqual(destination.read_bytes(), payload)
+        request.assert_called_once_with(dataset.huggingface_links()[name], timeout=120)
+        source = json.loads((self.base / 'raw/download_source.json').read_text())
+        self.assertEqual(source['downloaded'], [name])
+        self.assertEqual(source['requested_revision'], dataset.HF_REVISION)
+        self.assertEqual(len(source['reused_existing']), 5)
+
+    def test_huggingface_rejects_truncated_response(self):
+        self.archives()
+        name = 'annotation_train.odgt'
+        destination = dataset.destination(name)
+        payload = destination.read_bytes()
+        destination.unlink()
+        response = io.BytesIO(payload)
+        response.headers = {'Content-Type': 'application/octet-stream', 'Content-Length': str(len(payload) + 1)}
+        with patch.object(dataset.urllib.request, 'urlopen', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'Hugging Face download failed'):
+                dataset.download_huggingface()
+        self.assertFalse(destination.exists())
+        self.assertFalse(destination.with_suffix('.odgt.part').exists())
 
     def test_runtime_boundary_and_symlink(self):
         with self.assertRaises(ValueError):

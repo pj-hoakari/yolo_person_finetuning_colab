@@ -2,7 +2,7 @@
 
 Google Colabの一時ストレージだけでCrowdHumanを取得・変換し、YOLO26nの追加学習と評価を行います。`crowdhuman_finetuning.ipynb` をColabで開き、設定を確認して上から実行します。全処理と合成テストは、ノートブック内の通常のPythonセルとして収めています。外部のsrcファイルやテストファイルの取得・生成は不要です。
 
-[Colabで開く（GitHubへ反映後）](https://colab.research.google.com/github/aira0110/yolo_person_finetuning_colab/blob/main/crowdhuman_finetuning.ipynb)
+[Colabで開く](https://colab.research.google.com/github/pj-hoakari/yolo_person_finetuning_colab/blob/main/crowdhuman_finetuning.ipynb)
 
 ## GitHubでの管理
 
@@ -39,7 +39,7 @@ COCOのperson事前学習モデルをそのままheadの正解ラベルで比較
 
 ```text
 crowdhuman_finetuning.ipynb  # 出力なし・日本語19段階・コード同梱
-src/dataset.py              # 公式取得、ZIP/ODGT/画像検証、安全な展開
+src/dataset.py              # Hugging Face取得、ZIP/ODGT/画像検証、安全な展開
 src/converter.py            # vbox / hbox / both変換、ラベル検査
 src/trainer.py             # 学習設定、再開、実験情報
 src/evaluator.py            # 評価、比較CSV、ONNX検査、手動ダウンロード
@@ -65,7 +65,7 @@ requirements.txt
 
 **ランタイム終了・リセットで、画像、ラベル、ログ、チェックポイント、exportsも失われます。** Driveへの自動保存はありません。ノートブックの保存は学習済み重みの保存にはなりません。
 
-### 公式取得と手動フォールバック
+### Hugging Faceからの取得と手動フォールバック
 
 必要なファイルは次の6つです。
 
@@ -73,9 +73,13 @@ requirements.txt
 - `CrowdHuman_val.zip`
 - `annotation_train.odgt` / `annotation_val.odgt`
 
-実行時に公式ページが案内するGoogle Driveの公開リンクを読み取り、通常の公開HTTPダウンロードを試みます。これはDriveのマウントではありません。認証・アクセス制限・確認画面への回避処理はありません。今回の開発環境から配布ファイルを実際に取得できることは未検証です。
+取得先は[sshao0516/CrowdHuman](https://huggingface.co/datasets/sshao0516/CrowdHuman)です。公開プロフィールでShuai Shao名義を確認し、元のZIP・ODGTが揃ったコミット`d97203da87e348ea69f7a7633a57c21a956120a6`に固定しています。Hugging FaceのカードにはCC BY-NC 4.0のメタデータと、CrowdHumanの非商用研究・教育／画像再配布禁止の条件が記載されています。取得先の変更によって画像・アノテーションを公開する権限が得られるわけではありません。
 
-自動取得に失敗した場合だけ、公式から正規に入手したファイルをColabのアップロードUIで配置します。自動取得不能を既に確認した場合は`AUTO_DOWNLOAD=False`で手動経路に入れます。大容量ZIPのブラウザアップロードはRAMを使うため、必要なら1つずつアップロードしてセルを再実行してください。アップロード対象を間違えないでください。
+設定セルの`HF_DATASET_REPO`と`HF_DATASET_REVISION`で取得先を指定します。revisionには40桁のコミットSHAを指定します。変更する場合も、同じ6ファイルが揃い、利用が認められる配布元を使ってください。test用ZIPや変換済みの第三者ラベルは取得しません。vbox/hbox/ignoreは元のODGTから処理します。
+
+標準HTTPSの公開resolve URLから、`/content/crowdhuman/raw/archives/`と`raw/annotations/`へ直接ストリーミング保存します。Hugging FaceのSDK・認証トークン・外部キャッシュは使用しません。通常のHTTPSリダイレクトには対応しますが、認証・アクセス制限・確認画面の回避処理はありません。取得したファイルと再利用したファイルは`raw/download_source.json`に記録します。実データのネットワーク取得は開発環境では未検証です。
+
+自動取得に失敗した場合だけ、正規に入手したファイルをColabのアップロードUIで配置します。自動取得不能を既に確認した場合は`AUTO_DOWNLOAD=False`で手動経路に入れます。大容量ZIPのブラウザアップロードはRAMを使うため、必要なら1つずつアップロードしてセルを再実行してください。アップロード対象を間違えないでください。
 
 アップロード中のファイルは`raw/`に置かれ、検証後にarchives/annotationsへ移動します。正常な既存ファイルは再ダウンロードしません。既存ファイルが破損している場合は停止し、無言で置換しません。Colabのファイル欄で破損した対象を明示的に削除・交換して再実行します。
 
@@ -140,7 +144,7 @@ ONNXはopset 13、dynamic、FP32、simplify=Falseで出力します。`onnx.chec
 
 実データの保存先はコードで`/content/crowdhuman/`配下に制限します。範囲外へのsymlinkも拒否します。Driveマウント、Hubアップロード、外部画像API、GitHub Releases/Artifacts/Actionsへの保存処理はありません。同期・外部実験追跡を設定で無効にし、HUB/Platform/analytics等のintegration callback登録も停止します。学習・検証のplot、画像表示、予測画像保存を使いません。大量ログはランタイム内のconsole.log等に保存し、ノートブックには要約だけを表示します。
 
-これはOSのネットワーク遮断ではありません。パッケージ・公式重み・公式データの取得にはネットワークを使います。ユーザーが別途外部連携を有効にしないでください。ノートブックを共有する前に、出力除去とステージ済みファイルを確認してください。
+これはOSのネットワーク遮断ではありません。パッケージ・公式重み・Hugging Face上のCrowdHumanの取得にはネットワークを使います。ユーザーが別途外部連携を有効にしないでください。ノートブックを共有する前に、出力除去とステージ済みファイルを確認してください。
 
 `.gitignore`で指定のデータ・画像・重み・秘密情報・Pythonキャッシュを除外し、exportsも除外します。`git add -f`を防ぐ仕組みではないため、実データをリポジトリ内に配置しない運用を維持してください。認証情報のコード直書きはありません。開発用テストは独自作成の合成データだけを一時ディレクトリへ保存します。
 
@@ -163,7 +167,7 @@ python3 tools/smoke_training.py --onnx-check
 
 実施済みの検証:
 
-- 合成データによる43件の自動テストが成功。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
+- 合成データによる46件の自動テストが成功。Hugging Faceの固定URL、入力値制限、正常取得、既存ファイル再利用、HTML拒否、不完全レスポンスの削除も確認しました。このうちノートブック単体検査では、ノートブック内の12件の合成テストも実行して成功しています。変換・ignore・クリッピング・不正bbox・class・split・YAML・Git除外・不足/破損ファイル・ZIPパス検査・取得済みファイル再利用・再開ガード・比較CSV・ダウンロード許可対象・ONNX契約判定を確認しました。ONNX契約判定の単体テストはRuntimeをモックしています。
 - Ultralytics 8.4.52 / PyTorch 2.12.0+cu130のCPUで、独自作成した合成画像とランダム初期化YOLO26による3モード各1 epochの学習、評価、PT/CSV出力、比較CSV生成が成功しました。学習出力に画像ファイルが生成されないことも確認しました。これは公式事前学習重みからのFine-tuningや実精度の検証ではありません。
 - ランダム重みのYOLO26をopset 13・dynamic・FP32のONNXへ出力し、onnx.checkerが成功しました。
 - Pythonとノートブック全コードセルの構文、埋め込みソースの一致、出力が空であること、Git差分の空白エラーと管理対象を確認しました。

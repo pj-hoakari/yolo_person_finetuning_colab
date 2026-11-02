@@ -76,6 +76,7 @@ print('インストール完了')''')
 初回は `DEBUG_MODE=True`、少ないepochで動作確認してください。正式比較ではFalseに戻し、別のRUN_NAMEを使います。
 `MODES_TO_RUN=["vbox", "hbox"]` で同じ設定の比較を一括実行できます。bothは2クラスです。
 利用条件とクラウド処理の可否を確認後に `TERMS_REVIEWED=True` にします。認証情報は入力しません。
+取得先はHugging Faceのsshao0516/CrowdHumanです。HF_DATASET_REVISIONに40桁のコミットSHAを指定してデータの版を固定します。
 中断した同一実験だけ `RESUME=True` にします。設定・データ・依存バージョンが変わる再開は拒否します。''')
     code('''TRAIN_MODE = 'vbox'
 MODES_TO_RUN = [TRAIN_MODE]  # 比較例: ['vbox', 'hbox']; 3モード: ['vbox', 'hbox', 'both']
@@ -91,6 +92,8 @@ RESUME = False
 ALLOW_CPU = False
 TERMS_REVIEWED = False
 AUTO_DOWNLOAD = True
+HF_DATASET_REPO = 'sshao0516/CrowdHuman'
+HF_DATASET_REVISION = 'd97203da87e348ea69f7a7633a57c21a956120a6'
 EXPORT_ONNX = True
 WEBAPP_CONTRACT = None  # 既存アプリから採取したinput/outputs辞書。未指定では互換性を確定しません。
 BASE_DIR = '/content/crowdhuman'
@@ -111,25 +114,27 @@ GitHubで管理する開発用srcとこのノートブックは、tools/build_no
 with local_console(BASE / 'setup.log'):
     YOLO = private_yolo()
 print('ランタイム内の保存先とプライバシー設定を準備しました')''')
-    md('''## 6. CrowdHumanの公式取得またはアップロード
-公式ページが現在案内する公開リンクのみを使います。配布元がGoogle Driveでも、ファイルの保存先はColabの一時領域です。
-認証・確認画面・アクセス制限・通信失敗があれば自動取得を停止します。回避処理はありません。
-その場合だけ、公式から正規に取得した不足ファイルをアップロードします。AUTO_DOWNLOAD=Falseは、既に自動取得不能と確認した場合の手動経路です。
-大きいZIPのブラウザアップロードはRAMを消費するため、必要ならファイルを1つずつ選び、このセルを再実行してください。
-正常な既存ファイルは再取得しません。破損ファイルは確認のうえランタイム内から削除・交換してください。''')
+    md('''## 6. Hugging Faceから取得またはアップロード
+[sshao0516/CrowdHuman](https://huggingface.co/datasets/sshao0516/CrowdHuman)から、画像ZIP4個と元のODGT2個だけを取得します。
+ノートブックの設定でリポジトリとコミットSHAを指定できます。test用画像や変換済みラベルは取得しません。
+標準HTTPで公開ファイルをraw/archives・raw/annotationsへ直接保存します。Hugging FaceのSDK・外部キャッシュ・ログインは使用しません。
+認証・アクセス制限・通信失敗があれば停止し、回避処理は行いません。その場合だけ、正規に取得した不足ファイルをアップロードします。
+AUTO_DOWNLOAD=Falseは自動取得不能を既に確認した場合の手動経路です。
+正常な既存ファイルは再取得しません。破損ファイルは確認のうえランタイム内から削除・交換してください。
+Hugging Faceからの取得は、画像・アノテーションのアップロードや再配布を許可するものではありません。''')
     code(inline_source('dataset.py') + '\n\n' + '''if not TERMS_REVIEWED:
     raise RuntimeError('公式利用条件とColabでの処理可否を確認し、TERMS_REVIEWED=Trueにしてください。')
 if AUTO_DOWNLOAD:
     try:
-        download_official()
+        download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION)
         print('必要ファイルを取得・再利用しました')
     except Exception:
-        print('自動取得できません。公式から正規取得した不足ファイルを選択してください。')
+        print('Hugging Faceから自動取得できません。正規取得した不足ファイルを選択してください。')
         upload_missing()
 else:
     upload_missing()''')
     md('''## 7. ファイル整合性・空き容量確認
-必須6ファイル、全ZIPのCRC、ODGT構造と公式の件数(train 15,000 / val 4,370)を確認します。
+必須6ファイル、全ZIPのCRC、ODGT構造とCrowdHumanの件数(train 15,000 / val 4,370)を確認します。
 データの内容や画像IDは表示せず件数だけを出力します。展開前に非圧縮サイズと空き容量も確認します。''')
     code('''print(inventory())''')
     md('''## 8. ZIPの安全な解凍

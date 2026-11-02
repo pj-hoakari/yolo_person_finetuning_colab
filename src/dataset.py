@@ -1,4 +1,4 @@
-"""Official downloads, fail-closed validation, safe extraction; no image display."""
+"""Public Hugging Face downloads, local validation and safe extraction."""
 import json
 import re
 import shutil
@@ -9,7 +9,8 @@ import zlib
 from pathlib import Path
 from .privacy import BASE, runtime_path
 
-OFFICIAL_PAGE = 'https://www.crowdhuman.org/download.html'
+HF_REPO_ID = 'sshao0516/CrowdHuman'
+HF_REVISION = 'd97203da87e348ea69f7a7633a57c21a956120a6'
 ARCHIVES = ('CrowdHuman_train01.zip', 'CrowdHuman_train02.zip', 'CrowdHuman_train03.zip', 'CrowdHuman_val.zip')
 ANNOTATIONS = ('annotation_train.odgt', 'annotation_val.odgt')
 EXPECTED = {'train': 15000, 'val': 4370}
@@ -58,54 +59,55 @@ def validate_file(path, name):
     return count
 
 
-def official_links():
-    """Resolve only public Google links currently advertised by the official page."""
-    with urllib.request.urlopen(OFFICIAL_PAGE, timeout=60) as response:
-        page = response.read().decode('utf-8')
-    found = {}
-    for name in ARCHIVES + ANNOTATIONS:
-        match = re.search(re.escape(name) + r'(?:(?!CrowdHuman_\w+\.zip|annotation_\w+\.odgt).)*?href=[\"\'](https://drive\.google\.com/[^\"\']+)', page, re.S)
-        if match:
-            drive_id = re.search(r'/d/([A-Za-z0-9_-]+)', match[1])
-            if drive_id:
-                found[name] = f'https://drive.google.com/uc?export=download&id={drive_id[1]}'
-    return found
+def huggingface_links(repo_id=HF_REPO_ID, revision=HF_REVISION):
+    """Pin all six original files to one public dataset commit, without Hub upload APIs."""
+    if not isinstance(repo_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+', repo_id):
+        raise ValueError('Invalid Hugging Face dataset repository ID')
+    if not isinstance(revision, str) or not re.fullmatch(r'[a-f0-9]{40}', revision):
+        raise ValueError('Use a full Hugging Face dataset commit SHA as revision')
+    root = f'https://huggingface.co/datasets/{repo_id}/resolve/{revision}'
+    return {name: f'{root}/{name}?download=true' for name in ARCHIVES + ANNOTATIONS}
 
 
-def download_official():
-    """No cookies, authentication, quota bypass or confirmation-token workaround."""
+def download_huggingface(repo_id=HF_REPO_ID, revision=HF_REVISION):
+    """Stream public resolve URLs straight to /content; no Hub cache, login or uploads."""
+    links = huggingface_links(repo_id, revision)
     needed = []
     for name in ARCHIVES + ANNOTATIONS:
-        path = destination(name)
+        path = runtime_path(destination(name))
         if path.exists():
             validate_file(path, name)  # Corrupt files require explicit removal/replacement.
         else:
             needed.append(name)
-    if not needed:
-        return
-    links = official_links()
     for name in needed:
-        if name not in links:
-            raise RuntimeError('Official public link unavailable; use lawful manual upload')
-        path = destination(name)
-        runtime_path(path)
-        temp = path.with_suffix(path.suffix + '.part')
+        path = runtime_path(destination(name))
+        temp = runtime_path(path.with_suffix(path.suffix + '.part'))
         try:
+            # Standard HTTPS redirects support Hugging Face's public file storage.
+            # No stored tokens, cookies, auth headers or gate/limit bypass are used.
             with urllib.request.urlopen(links[name], timeout=120) as response, open(temp, 'wb') as out:
-                if 'text/html' in response.headers.get('Content-Type', ''):
-                    raise RuntimeError('Public download unavailable; use lawful manual upload')
+                if 'text/html' in response.headers.get('Content-Type', '').lower():
+                    raise RuntimeError('Hugging Face returned an access page instead of a file')
                 length = int(response.headers.get('Content-Length', 0))
                 if length and shutil.disk_usage(BASE).free < length + 2 * 1024**3:
                     raise OSError('Insufficient download disk space')
+                received = 0
                 while chunk := response.read(1024**2):
                     if shutil.disk_usage(BASE).free < len(chunk) + 1024**3:
                         raise OSError('Insufficient download disk space')
                     out.write(chunk)
+                    received += len(chunk)
+                if length and received != length:
+                    raise ValueError('Incomplete Hugging Face response')
             validate_file(temp, name)
             temp.replace(path)
         except Exception:
             temp.unlink(missing_ok=True)
-            raise RuntimeError(f'Download failed: {name}; use lawful manual upload') from None
+            raise RuntimeError(f'Hugging Face download failed: {name}; use lawful manual upload if access is unavailable') from None
+    source = runtime_path(BASE / 'raw/download_source.json')
+    source.write_text(json.dumps({'requested_repo_id': repo_id, 'requested_revision': revision,
+                                  'downloaded': needed,
+                                  'reused_existing': [name for name in ARCHIVES + ANNOTATIONS if name not in needed]}, indent=2))
 
 
 def upload_missing():
