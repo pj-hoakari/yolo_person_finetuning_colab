@@ -1,9 +1,14 @@
 """Public Hugging Face downloads, local validation and safe extraction."""
 import json
+import traceback
+import uuid
+from datetime import datetime, timezone
 import re
 import shutil
 import stat
 import urllib.request
+import urllib.error
+from urllib.parse import urlsplit
 import zipfile
 import zlib
 from pathlib import Path
@@ -69,45 +74,132 @@ def huggingface_links(repo_id=HF_REPO_ID, revision=HF_REVISION):
     return {name: f'{root}/{name}?download=true' for name in ARCHIVES + ANNOTATIONS}
 
 
+def _safe_download_message(message):
+    """Never retain signed URLs, credentials, response bodies or annotation content."""
+    text = re.sub(r'https?://[^\s\"\'<>]+', '[URL removed]', str(message))
+    text = re.sub(r'(?i)\b(?:hf_[A-Za-z0-9]+|Bearer\s+[^\s,;]+)', '[credential removed]', text)
+    text = re.sub(r'(?i)((?:token|password|authorization|signature|credential|api[_-]?key)\s*[:=]\s*)[^\s,;]+', r'\1[redacted]', text)
+    return text[:1000]
+
+
+def _download_event(log_path, context, event, **details):
+    path = runtime_path(log_path)
+    runtime_path(path.parent).mkdir(parents=True, exist_ok=True)
+    entry = {'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+             'event': event, **context, **details}
+    with open(path, 'a', encoding='utf-8') as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
+def _download_error_details(error):
+    chain, seen = [], set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        item = {'type': type(current).__name__, 'message': _safe_download_message(current)}
+        if isinstance(current, urllib.error.HTTPError):
+            item['http_status'] = current.code
+            item['reason'] = _safe_download_message(current.reason)
+            if current.headers:
+                item['response_headers'] = {
+                    name: _safe_download_message(current.headers[name])
+                    for name in ('X-Request-Id', 'Retry-After') if name in current.headers}
+        elif isinstance(current, urllib.error.URLError):
+            item['reason'] = _safe_download_message(current.reason)
+        if isinstance(current, OSError) and current.errno is not None:
+            item['errno'] = current.errno
+        # Stack locations only: no source lines, locals, response payloads or data IDs.
+        item['stack'] = [{'file': Path(frame.filename).name, 'line': frame.lineno,
+                          'function': frame.name}
+                         for frame in traceback.extract_tb(current.__traceback__)]
+        chain.append(item)
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return chain
+
+
 def download_huggingface(repo_id=HF_REPO_ID, revision=HF_REVISION):
-    """Stream public resolve URLs straight to /content; no Hub cache, login or uploads."""
-    links = huggingface_links(repo_id, revision)
-    needed = []
-    for name in ARCHIVES + ANNOTATIONS:
-        path = runtime_path(destination(name))
-        if path.exists():
-            validate_file(path, name)  # Corrupt files require explicit removal/replacement.
-        else:
-            needed.append(name)
-    for name in needed:
-        path = runtime_path(destination(name))
-        temp = runtime_path(path.with_suffix(path.suffix + '.part'))
-        try:
-            # Standard HTTPS redirects support Hugging Face's public file storage.
-            # No stored tokens, cookies, auth headers or gate/limit bypass are used.
+    """Download public files and retain sanitized diagnostics inside the runtime."""
+    log_path = runtime_path(BASE / 'logs/download.jsonl')
+    context = {'attempt_id': uuid.uuid4().hex, 'stage': 'configuration'}
+    temp = None
+    try:
+        links = huggingface_links(repo_id, revision)
+        context.update(repo_id=repo_id, revision=revision)
+        _download_event(log_path, context, 'start')
+        needed = []
+        for name in ARCHIVES + ANNOTATIONS:
+            context.update(filename=name, stage='existing_file_validation')
+            path = runtime_path(destination(name))
+            if path.exists():
+                validate_file(path, name)
+                _download_event(log_path, context, 'reused', bytes_on_disk=path.stat().st_size)
+            else:
+                needed.append(name)
+        for name in needed:
+            context = {'attempt_id': context['attempt_id'], 'repo_id': repo_id,
+                       'revision': revision, 'filename': name, 'stage': 'http_request',
+                       'bytes_received': 0}
+            path = runtime_path(destination(name))
+            temp = runtime_path(path.with_suffix(path.suffix + '.part'))
+            _download_event(log_path, context, 'file_start')
+            # No auth headers, cookies, response bodies or signed redirect URLs are logged.
             with urllib.request.urlopen(links[name], timeout=120) as response, open(temp, 'wb') as out:
-                if 'text/html' in response.headers.get('Content-Type', '').lower():
+                context['http_status'] = getattr(response, 'status', None)
+                context['response_host'] = urlsplit(response.geturl()).hostname if hasattr(response, 'geturl') else 'huggingface.co'
+                content_type = response.headers.get('Content-Type', '')
+                context['content_type'] = _safe_download_message(content_type)
+                if 'text/html' in content_type.lower():
                     raise RuntimeError('Hugging Face returned an access page instead of a file')
                 length = int(response.headers.get('Content-Length', 0))
-                if length and shutil.disk_usage(BASE).free < length + 2 * 1024**3:
+                context.update(expected_bytes=length, stage='disk_space_check',
+                               free_bytes=shutil.disk_usage(BASE).free)
+                _download_event(log_path, context, 'response')
+                if length and context['free_bytes'] < length + 2 * 1024**3:
                     raise OSError('Insufficient download disk space')
-                received = 0
+                context['stage'] = 'transfer'
+                last_progress = 0
                 while chunk := response.read(1024**2):
-                    if shutil.disk_usage(BASE).free < len(chunk) + 1024**3:
+                    context['free_bytes'] = shutil.disk_usage(BASE).free
+                    if context['free_bytes'] < len(chunk) + 1024**3:
                         raise OSError('Insufficient download disk space')
                     out.write(chunk)
-                    received += len(chunk)
-                if length and received != length:
+                    context['bytes_received'] += len(chunk)
+                    if context['bytes_received'] - last_progress >= 64 * 1024**2:
+                        _download_event(log_path, context, 'progress')
+                        last_progress = context['bytes_received']
+                if length and context['bytes_received'] != length:
                     raise ValueError('Incomplete Hugging Face response')
+            context['stage'] = 'downloaded_file_validation'
             validate_file(temp, name)
             temp.replace(path)
-        except Exception:
-            temp.unlink(missing_ok=True)
-            raise RuntimeError(f'Hugging Face download failed: {name}; use lawful manual upload if access is unavailable') from None
-    source = runtime_path(BASE / 'raw/download_source.json')
-    source.write_text(json.dumps({'requested_repo_id': repo_id, 'requested_revision': revision,
-                                  'downloaded': needed,
-                                  'reused_existing': [name for name in ARCHIVES + ANNOTATIONS if name not in needed]}, indent=2))
+            temp = None
+            _download_event(log_path, context, 'file_complete')
+        context['stage'] = 'save_source_metadata'
+        source = runtime_path(BASE / 'raw/download_source.json')
+        source.write_text(json.dumps({'requested_repo_id': repo_id, 'requested_revision': revision,
+                                      'downloaded': needed,
+                                      'reused_existing': [name for name in ARCHIVES + ANNOTATIONS if name not in needed]}, indent=2))
+        _download_event(log_path, context, 'complete', downloaded_files=len(needed),
+                        reused_files=len(ARCHIVES + ANNOTATIONS) - len(needed))
+        return log_path
+    except (Exception, KeyboardInterrupt) as error:
+        cleanup_error = None
+        if temp is not None:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError as cleanup:
+                cleanup_error = _safe_download_message(cleanup)
+        log_note = f'Log: {log_path}'
+        try:
+            _download_event(log_path, context, 'interrupted' if isinstance(error, KeyboardInterrupt) else 'error',
+                            errors=_download_error_details(error), cleanup_error=cleanup_error)
+        except OSError as log_error:
+            log_note = f'Could not write log {log_path}: {_safe_download_message(log_error)}'
+        if isinstance(error, KeyboardInterrupt):
+            raise
+        raise RuntimeError(f'Hugging Face download failed: {context.get("filename", "configuration")}; '
+                           f'{type(error).__name__}: {_safe_download_message(error)}. '
+                           + log_note) from None
 
 
 def upload_missing():

@@ -292,6 +292,113 @@ class SyntheticRuntime(unittest.TestCase):
         self.assertFalse(destination.exists())
         self.assertFalse(destination.with_suffix('.odgt.part').exists())
 
+    def prepare_download_failure(self):
+        self.archives()
+        dataset.destination('annotation_train.odgt').unlink()
+
+    def download_log_entries(self):
+        return [json.loads(line) for line in (self.base / 'logs/download.jsonl').read_text().splitlines()]
+
+    def test_http_error_log_is_diagnostic_and_redacted(self):
+        self.prepare_download_failure()
+        error = dataset.urllib.error.HTTPError(
+            'https://cdn.example/file?token=private-signature', 403,
+            'Forbidden https://cdn.example/file?token=private-signature Bearer hf_privatecredential',
+            {'X-Request-Id': 'synthetic-request', 'Authorization': 'Bearer never-log-this'},
+            io.BytesIO(b'private response body'))
+        with patch.object(dataset.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, 'HTTPError.*403.*Log:') as caught:
+                dataset.download_huggingface()
+        entry = self.download_log_entries()[-1]
+        self.assertEqual(entry['event'], 'error')
+        self.assertEqual(entry['filename'], 'annotation_train.odgt')
+        self.assertEqual(entry['stage'], 'http_request')
+        self.assertEqual(entry['errors'][0]['http_status'], 403)
+        self.assertEqual(entry['errors'][0]['response_headers']['X-Request-Id'], 'synthetic-request')
+        self.assertTrue(entry['errors'][0]['stack'])
+        self.assertTrue(entry['timestamp_utc'])
+        text = (self.base / 'logs/download.jsonl').read_text() + str(caught.exception)
+        for secret in ('private-signature', 'hf_privatecredential', 'never-log-this', 'private response body'):
+            self.assertNotIn(secret, text)
+        self.assertEqual(error.fp.tell(), 0)
+
+    def test_dns_error_log(self):
+        self.prepare_download_failure()
+        error = dataset.urllib.error.URLError(OSError(-3, 'Temporary failure in name resolution'))
+        with patch.object(dataset.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, 'URLError.*name resolution'):
+                dataset.download_huggingface()
+        entry = self.download_log_entries()[-1]
+        self.assertEqual(entry['errors'][0]['type'], 'URLError')
+        self.assertIn('name resolution', entry['errors'][0]['reason'])
+
+    def test_existing_corrupt_file_error_is_logged(self):
+        self.archives()
+        dataset.destination('CrowdHuman_train01.zip').write_bytes(b'synthetic-corrupt-zip')
+        with patch.object(dataset.urllib.request, 'urlopen', side_effect=AssertionError('must not download')):
+            with self.assertRaisesRegex(RuntimeError, 'Invalid ZIP'):
+                dataset.download_huggingface()
+        entry = self.download_log_entries()[-1]
+        self.assertEqual(entry['stage'], 'existing_file_validation')
+        self.assertEqual(entry['filename'], 'CrowdHuman_train01.zip')
+        self.assertEqual(entry['errors'][0]['type'], 'ValueError')
+
+    def test_truncated_response_log_has_byte_counts(self):
+        self.prepare_download_failure()
+        payload = json.dumps({'ID': 'synthetic', 'gtboxes': []}).encode()
+        response = io.BytesIO(payload)
+        response.headers = {'Content-Length': str(len(payload) + 10)}
+        with patch.object(dataset.urllib.request, 'urlopen', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'Incomplete Hugging Face response'):
+                dataset.download_huggingface()
+        entry = self.download_log_entries()[-1]
+        self.assertEqual(entry['stage'], 'transfer')
+        self.assertEqual(entry['bytes_received'], len(payload))
+        self.assertEqual(entry['expected_bytes'], len(payload) + 10)
+
+    def test_success_logs_append_attempts_and_reuse(self):
+        self.archives()
+        first_path = dataset.download_huggingface()
+        dataset.download_huggingface()
+        entries = self.download_log_entries()
+        self.assertEqual(first_path, self.base / 'logs/download.jsonl')
+        self.assertEqual(len({entry['attempt_id'] for entry in entries}), 2)
+        self.assertEqual(sum(entry['event'] == 'reused' for entry in entries), 12)
+        self.assertEqual(sum(entry['event'] == 'complete' for entry in entries), 2)
+
+    def test_redirect_url_credentials_are_not_logged(self):
+        self.prepare_download_failure()
+        payload = json.dumps({'ID': 'synthetic', 'gtboxes': []}).encode()
+        response = io.BytesIO(payload)
+        response.headers = {'Content-Length': str(len(payload)), 'Content-Type': 'application/octet-stream'}
+        response.status = 200
+        response.geturl = lambda: 'https://storage.example/private?X-Amz-Signature=synthetic-secret'
+        with patch.object(dataset.urllib.request, 'urlopen', return_value=response):
+            dataset.download_huggingface()
+        entry = next(item for item in self.download_log_entries() if item['event'] == 'response')
+        self.assertEqual(entry['response_host'], 'storage.example')
+        self.assertEqual(entry['http_status'], 200)
+        self.assertNotIn('synthetic-secret', (self.base / 'logs/download.jsonl').read_text())
+
+    def test_log_write_failure_is_reported(self):
+        with patch.object(dataset, '_download_event', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaisesRegex(RuntimeError, 'Could not write log.*No space left'):
+                dataset.download_huggingface()
+
+    def test_interruption_is_logged_and_preserved(self):
+        self.prepare_download_failure()
+        with patch.object(dataset.urllib.request, 'urlopen', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                dataset.download_huggingface()
+        self.assertEqual(self.download_log_entries()[-1]['event'], 'interrupted')
+
+    def test_invalid_configuration_logged_without_raw_input(self):
+        with self.assertRaisesRegex(RuntimeError, 'Invalid Hugging Face'):
+            dataset.download_huggingface('unsafe?token=synthetic-secret')
+        entry = self.download_log_entries()[-1]
+        self.assertEqual(entry['stage'], 'configuration')
+        self.assertNotIn('synthetic-secret', json.dumps(entry))
+
     def test_runtime_boundary_and_symlink(self):
         with self.assertRaises(ValueError):
             privacy.runtime_path(self.base.parent / 'outside')
@@ -433,7 +540,7 @@ class ProjectTests(unittest.TestCase):
             root = Path(directory)
             (root / '.gitignore').write_text((PROJECT / '.gitignore').read_text())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
-            for name in ('CrowdHuman/a.txt', 'crowdhuman/a.txt', 'datasets/a', 'data/a', 'sample.odgt', 'sample.zip', 'a.jpg', 'a.jpeg', 'a.png', 'a.webp', 'runs/a.txt', 'weights/a', 'checkpoints/a', 'a.pt', 'a.pth', 'a.onnx', '.env', '.env.local', 'a.key', '__pycache__/a', '.ipynb_checkpoints/a'):
+            for name in ('CrowdHuman/a.txt', 'crowdhuman/a.txt', 'datasets/a', 'data/a', 'sample.odgt', 'sample.zip', 'a.jpg', 'a.jpeg', 'a.png', 'a.webp', 'runs/a.txt', 'weights/a', 'checkpoints/a', 'a.pt', 'a.pth', 'a.onnx', '.env', '.env.local', 'a.key', '__pycache__/a', '.ipynb_checkpoints/a', 'logs/download.jsonl', 'console.log'):
                 with self.subTest(name=name):
                     result = subprocess.run(['git', '-C', str(root), 'check-ignore', '-q', '--', name])
                     self.assertEqual(result.returncode, 0)

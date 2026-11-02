@@ -121,15 +121,18 @@ print('ランタイム内の保存先とプライバシー設定を準備しま�
 認証・アクセス制限・通信失敗があれば停止し、回避処理は行いません。その場合だけ、正規に取得した不足ファイルをアップロードします。
 AUTO_DOWNLOAD=Falseは自動取得不能を既に確認した場合の手動経路です。
 正常な既存ファイルは再取得しません。破損ファイルは確認のうえランタイム内から削除・交換してください。
+失敗理由は画面に短く表示し、日時・失敗段階・対象ファイル・HTTPステータス・転送量・例外とスタック位置を `/content/crowdhuman/logs/download.jsonl` に追記します。
+Colabのファイル欄からログを開けます。署名付きURL、認証情報、レスポンス本文やアノテーション内容は記録しません。
 Hugging Faceからの取得は、画像・アノテーションのアップロードや再配布を許可するものではありません。''')
     code(inline_source('dataset.py') + '\n\n' + '''if not TERMS_REVIEWED:
     raise RuntimeError('公式利用条件とColabでの処理可否を確認し、TERMS_REVIEWED=Trueにしてください。')
 if AUTO_DOWNLOAD:
     try:
-        download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION)
-        print('必要ファイルを取得・再利用しました')
-    except Exception:
-        print('Hugging Faceから自動取得できません。正規取得した不足ファイルを選択してください。')
+        download_log = download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION)
+        print('必要ファイルを取得・再利用しました。ログ:', download_log)
+    except RuntimeError as error:
+        print(str(error))
+        print('上記のログを確認してください。正規取得した不足ファイルは以下からアップロードできます。')
         upload_missing()
 else:
     upload_missing()''')

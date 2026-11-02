@@ -23,3 +23,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.cache
+
+# Runtime diagnostic logs
+logs/
+*.log
