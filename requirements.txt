@@ -1,0 +1,6 @@
+# ColabのCUDA対応torch/torchvisionを維持。実際の全バージョンは実行時に記録。
+ultralytics==8.4.52
+Pillow>=10,<13
+PyYAML>=6,<7
+onnx>=1.17,<2
+onnxruntime>=1.20,<2
