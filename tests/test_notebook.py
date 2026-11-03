@@ -49,6 +49,22 @@ class StandaloneNotebookTests(unittest.TestCase):
         self.assertIn('drive_runs_dir=DRIVE_CHECKPOINT_DIR', training)
         self.assertIn('checkpoint_status=show_saved_epoch', training)
 
+    def test_step_13_can_restore_without_steps_6_to_12(self):
+        notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
+        heading = next(i for i, cell in enumerate(notebook['cells'])
+                       if ''.join(cell['source']).startswith('## 13.'))
+        source = ''.join(notebook['cells'][heading + 1]['source'])
+        definitions = {node.name for node in ast.parse(source).body
+                       if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+        self.assertTrue({'restore_prepared_data', 'validate_labels', 'read_odgt',
+                         'TrainConfig', 'load_model'}.issubset(definitions))
+        self.assertIn('if RESTORE_PREPARED_FROM_DRIVE:', source)
+        self.assertIn('drive.mount(DRIVE_MOUNT_POINT)', source)
+        self.assertIn('yaml_paths = restore_prepared_data(', source)
+        self.assertNotIn('copy_drive_dataset(drive_dataset', source)
+        previous = ''.join(notebook['cells'][heading - 1]['source'])
+        self.assertIn('prepared_archive = save_prepared_data(', previous)
+
     def test_inline_synthetic_suite(self):
         notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
         # Execute only imports, definitions and literal constants. No Colab setup,

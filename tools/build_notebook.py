@@ -80,6 +80,8 @@ print('インストール完了')''')
 利用条件とクラウド処理の可否を確認後に `TERMS_REVIEWED=True` にします。認証情報は入力しません。
 Driveの保管先をDRIVE_DATASET_DIRに指定します。初回はHugging Faceから不足ファイルだけをDriveへ保存し、次回から再利用します。
 既に元ファイルをDriveへ配置した場合はDOWNLOAD_MISSING_TO_DRIVE=Falseにできます。HF_DATASET_REVISIONでデータの版を固定します。
+手順12の保存から再開する場合は `RESTORE_PREPARED_FROM_DRIVE=True` にし、手順2〜5の後に13へ進みます。
+保存時と同じMODES_TO_RUN・DEBUG_MODE・DEBUG_LIMITを指定してください。学習前ならRESUME=Falseのままです。
 中断した同一実験だけ `RESUME=True` にします。設定・データ・依存バージョンが変わる再開は拒否します。''')
     code('''TRAIN_MODE = 'vbox'
 MODES_TO_RUN = [TRAIN_MODE]  # 比較例: ['vbox', 'hbox']; 3モード: ['vbox', 'hbox', 'both']
@@ -94,6 +96,8 @@ RUN_NAME = 'experiment'
 RESUME = False  # 中断から再開する場合はTrue。Driveの最新保存を自動復元。
 SAVE_EVERY_EPOCH_TO_DRIVE = True
 DRIVE_CHECKPOINT_DIR = '/content/drive/MyDrive/crowdhuman/checkpoints'
+DRIVE_PREPARED_DIR = '/content/drive/MyDrive/crowdhuman/prepared'
+RESTORE_PREPARED_FROM_DRIVE = False  # 手順2〜5の後、13から復元・再開する場合True
 ALLOW_CPU = False
 TERMS_REVIEWED = False
 DRIVE_MOUNT_POINT = '/content/drive'
@@ -183,17 +187,45 @@ if not result.wasSuccessful():
 print({'synthetic_tests': result.testsRun, 'status': 'passed'})
 for mode in MODES_TO_RUN:
     print(mode, validate_labels(yaml_paths[mode].parent, mode))''')
-    md('''## 12. data.yamlの確認
+    md('''## 12. data.yamlの確認とGoogle Driveへの進捗保存
 変換時にdata.yamlを生成済みです。各モードにimages/train・images/val・labels/train・labels/valがあります。
-vboxは0:person、hboxは0:head、bothは0:person / 1:headです。データの内容は表示しません。''')
-    code('''for mode in MODES_TO_RUN:
+vboxは0:person、hboxは0:head、bothは0:person / 1:headです。データの内容は表示しません。
+検証後、展開画像・ODGT・変換済みラベルとYAMLをDRIVE_PREPARED_DIRへ非公開保存します。容量と転送時間が必要です。
+保存完了の表示を確認してからランタイムを終了してください。
+新しいランタイムではRESTORE_PREPARED_FROM_DRIVE=Trueにして手順2〜5を実行し、6〜12を飛ばして13へ進みます。''')
+    code(inline_source('preparation.py') + '\n\n' + '''for mode in MODES_TO_RUN:
     report = validate_labels(yaml_paths[mode].parent, mode)
-    print({'mode': mode, 'data_yaml_valid': True, 'counts': report})''')
+    print({'mode': mode, 'data_yaml_valid': True, 'counts': report})
+if not TERMS_REVIEWED:
+    raise RuntimeError('利用条件を確認してください。')
+if Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_PREPARED_DIR).absolute().parents:
+    raise ValueError('DRIVE_PREPARED_DIRはマウントしたGoogle Drive配下に指定してください。')
+prepared_settings = {'modes': MODES_TO_RUN, 'debug': DEBUG_MODE, 'debug_limit': DEBUG_LIMIT if DEBUG_MODE else None}
+print('手順12までの進捗をDriveへ保存中です。完了までお待ちください。')
+prepared_archive = save_prepared_data(DRIVE_PREPARED_DIR, prepared_settings)
+print('手順12までのDrive保存完了:', str(prepared_archive))''')
     md('''## 13. YOLOモデルの読み込み
 参考実装のyolo26n.pt（設定でyolo26s.ptも選択可能）を使用します。
 公式Ultralytics重みをランタイムに取得し、同じセッションではキャッシュを再利用します。
-外部からアップロードした信頼できない.ptは読み込みません。''')
-    code(inline_source('checkpoints.py') + '\n\n' + inline_source('trainer.py') + '\n\n' + '''if SAVE_EVERY_EPOCH_TO_DRIVE and Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_CHECKPOINT_DIR).absolute().parents:
+外部からアップロードした信頼できない.ptは読み込みません。
+RESTORE_PREPARED_FROM_DRIVE=Trueの場合、Driveをマウントし、手順12の保存を照合・復元します。
+新しいランタイムでは先に手順2〜5を実行してください。手順6〜12の再実行は不要です。
+復元先は空のローカルデータディレクトリに限ります。保存時と異なるモード・DEBUG設定や破損した保存は拒否します。''')
+    code(inline_source('dataset.py') + '\n\n' + inline_source('converter.py') + '\n\n' + inline_source('preparation.py') + '\n\n' + '''if RESTORE_PREPARED_FROM_DRIVE:
+    if not TERMS_REVIEWED:
+        raise RuntimeError('利用条件を確認し、TERMS_REVIEWED=Trueにしてください。')
+    from google.colab import drive
+    drive.mount(DRIVE_MOUNT_POINT)
+    if Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_PREPARED_DIR).absolute().parents:
+        raise ValueError('DRIVE_PREPARED_DIRはマウントしたGoogle Drive配下に指定してください。')
+    prepared_settings = {'modes': MODES_TO_RUN, 'debug': DEBUG_MODE, 'debug_limit': DEBUG_LIMIT if DEBUG_MODE else None}
+    print('手順12の保存を照合・復元中です。完了までお待ちください。')
+    yaml_paths = restore_prepared_data(DRIVE_PREPARED_DIR, prepared_settings)
+    for mode in MODES_TO_RUN:
+        validate_labels(yaml_paths[mode].parent, mode)
+    print('手順12の保存を復元しました。13から続行します。')
+
+''' + inline_source('checkpoints.py') + '\n\n' + inline_source('trainer.py') + '\n\n' + '''if SAVE_EVERY_EPOCH_TO_DRIVE and Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_CHECKPOINT_DIR).absolute().parents:
     raise ValueError('DRIVE_CHECKPOINT_DIRはマウントしたGoogle Drive配下に指定してください。')
 configs = [TrainConfig(mode=mode, model=BASE_MODEL, epochs=EPOCHS, batch=BATCH_SIZE,
                        imgsz=IMAGE_SIZE, seed=SEED, debug=DEBUG_MODE, run_name=RUN_NAME,
