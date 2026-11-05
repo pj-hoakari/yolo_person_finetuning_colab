@@ -287,12 +287,21 @@ for config in configs:
     exported_names.extend(export_model(config, onnx_export=EXPORT_ONNX, contract=WEBAPP_CONTRACT))
 print({'exported': exported_names})''')
     md('''## 17. 必要ファイルの明示ダウンロード
-このセルは初期状態ではダウンロードしません。必要なファイル名をDOWNLOAD_NAMESに列挙し、DO_DOWNLOAD=Trueに変更して、このセルだけを明示的に実行してください。
-.pt・.onnx・.csvに限定します。公開操作ではありません。学習済みモデルにもデータ由来の情報が含まれる可能性があるため、外部公開・商用利用前に条件を確認してください。''')
+手順14で評価後、DO_DOWNLOAD=Trueに変更して、このセルを実行すると学習結果のTXTを生成・ダウンロードします。
+ファイル名はtraining_results_YYYYMMDD_HHMMSS_ffffff.txt（実行時の日本時間、末尾はマイクロ秒）です。
+選択した各モードの学習設定・評価指標・クラス別評価・epochごとの損失と精度をUTF-8で記録します。手順16の実行は不要です。
+重みなども取得する場合はDOWNLOAD_NAMESにファイル名を列挙してください。TXTが不要な場合はDOWNLOAD_RESULTS_TXT=Falseにします。
+.pt・.onnx・.csv・.txtに限定します。公開操作ではありません。学習済みモデルにもデータ由来の情報が含まれる可能性があるため、外部公開・商用利用前に条件を確認してください。''')
     code('''DO_DOWNLOAD = False
+DOWNLOAD_RESULTS_TXT = True
 DOWNLOAD_NAMES = []  # 例: ['vbox_experiment.pt', 'comparison.csv']
 if DO_DOWNLOAD:
-    download_selected(DOWNLOAD_NAMES)
+    names_to_download = list(DOWNLOAD_NAMES)
+    if DOWNLOAD_RESULTS_TXT:
+        results_txt_name = export_results_txt(configs)
+        names_to_download.append(results_txt_name)
+        print('学習結果TXT:', results_txt_name)
+    download_selected(names_to_download)
 else:
     print('ダウンロード未実行')''')
     md('''## 18. 一時データの削除（任意）

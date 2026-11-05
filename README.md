@@ -30,7 +30,7 @@ CrowdHumanの元ZIP・ODGTを非公開のGoogle Driveフォルダに保管し、
 | 学習設定 | patience 10、cos_lr、close_mosaic、shear/perspective 0、AMP | 継承。cacheはFalse、workersは2、seed固定 |
 | クラス | single_cls=True | bothを維持できるようFalse |
 | 再開 | last.ptのepochとoptimizerを確認 | 継承し、設定・データ指紋・依存の一致も要求 |
-| 可視化・保存 | グラフ表示、予測画像保存、Drive保存 | 画像表示なし、plot無効、スカラーCSVと重みだけ明示取得 |
+| 可視化・保存 | グラフ表示、予測画像保存、Drive保存 | 画像表示なし、plot無効、学習結果TXT・スカラーCSV・重みを明示取得 |
 | 出力 | CSV、重み、ONNX（opset 13） | 継承。入出力検査と比較CSVを追加 |
 
 COCOのperson事前学習モデルをそのままheadの正解ラベルで比較する処理は設けていません。対象の異なるラベルとの比較に意味を持たせないためです。
@@ -62,7 +62,7 @@ requirements.txt
 3. 最初は`DEBUG_MODE=True`、`EPOCHS=1`、必要に応じてbatchを下げて確認します。DEBUGは各splitの先頭`DEBUG_LIMIT`画像を使います。全モードで同じ画像を選びます。ダウンロード容量・入力全体の検証量は減りません。
 4. セル6でDriveをマウントし、不足する元ファイルをHugging FaceからDriveへ保存して、`/content/crowdhuman/raw/`へコピーします。セル7〜11で展開・検証・変換・合成テストを実行します。画像IDやアノテーション自体は出力しません。
 5. セル12〜16でモデル準備、学習、評価、比較、モデル出力を行います。GPUがない場合は警告して停止します。意図的なCPUテストだけ`ALLOW_CPU=True`を指定できます。
-6. セル17で`DOWNLOAD_NAMES`に必要なファイルを列挙し、`DO_DOWNLOAD=True`としてそのセルを明示実行します。
+6. 手順14で評価後、セル17で`DO_DOWNLOAD=True`として実行すると、日時付きの学習結果TXTをダウンロードします。重みなども必要な場合は`DOWNLOAD_NAMES`に列挙します。
 7. 必要な重みの取得を確認後、セル18の削除フラグを必要なものだけ有効にします。
 
 **ランタイム終了・リセットで、Colab内のコピー、展開画像、ラベル、ログ、チェックポイント、exportsは失われます。** Driveに保管した元ZIP・ODGTは残るため、次回はDriveから再コピーできます。手順11で展開・変換済みデータを保存し、手順12から復元できます。既定で毎epochの再開用チェックポイントもDriveへ保存します。配布・アプリ利用向けのPT/ONNX/CSVはセル16〜17で出力・取得してください。セル18の削除対象もColab側だけです。
@@ -227,7 +227,9 @@ DEBUGから本番への移行やデータ変更時は、該当`processed/<mode>`
 
 ### 出力とWebアプリへの接続
 
-`exports/<mode>_<RUN_NAME>.pt`、`.onnx`、`_training.csv`、`comparison.csv`がダウンロード対象です。DEBUGでは実験名に`_debug`が付きます。runディレクトリ一式をZIPにしないため、画像・ラベルの混入を避けられます。`files.download()`を呼ぶのはセル17でユーザーが明示指定した場合だけです。
+セル17は既定で、選択したモードの学習設定・評価指標・クラス別評価・epochごとの損失と精度をまとめたUTF-8のTXTを生成します。ファイル名は`exports/training_results_YYYYMMDD_HHMMSS_ffffff.txt`で、セル実行時の日本時間とマイクロ秒を使います。手順14の評価が必要です。TXTだけなら手順16のモデル出力は不要です。`DO_DOWNLOAD=True`として明示実行するとダウンロードします。
+
+`exports/<mode>_<RUN_NAME>.pt`、`.onnx`、`_training.csv`、`comparison.csv`も`DOWNLOAD_NAMES`に指定して取得できます。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。DEBUGでは実験名に`_debug`が付きます。runディレクトリ一式をZIPにしないため、画像・ラベルの混入を避けられます。`files.download()`を呼ぶのはセル17でユーザーが明示指定した場合だけです。
 
 ONNXはopset 13、dynamic、FP32、simplify=Falseで出力します。`onnx.checker`とONNX Runtime CPUの合成ゼロ画像で検査し、`*_onnx_interface.json`に入出力名・dtype・shape・クラスを記録します。既存アプリのコード・モデル仕様はこの作業場所に提供されていないため、ブラウザ互換性は未検証です。
 

@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from .privacy import BASE, private_yolo, runtime_path, local_console
 from .trainer import device_for
@@ -143,12 +144,39 @@ def export_model(config, onnx_export=True, contract=None):
     return [p.name for p in sorted(out.glob(prefix + '*')) if p.suffix in ('.pt', '.onnx', '.csv')]
 
 
+def export_results_txt(configs):
+    """Export evaluated runs and epoch metrics as a timestamped UTF-8 report."""
+    created = datetime.now(timezone(timedelta(hours=9)))
+    sections = ['CrowdHuman 学習結果', f'出力日時: {created.isoformat()} (日本時間)']
+    if not configs:
+        raise ValueError('No training configurations selected')
+    for config in configs:
+        run = config.run_dir
+        record = json.loads(runtime_path(run / 'evaluation.json').read_text())
+        if record['specification']['config'] != asdict(config):
+            raise ValueError('Evaluation must use the saved training configuration')
+        if sha256(runtime_path(run / 'weights/best.pt')) != record['weight_sha256']:
+            raise ValueError('Stale evaluation: evaluate the current checkpoint again')
+        sections.extend(['', f'モード: {config.mode} / 実験名: {run.name}', '学習設定:',
+                         json.dumps(asdict(config), ensure_ascii=False, indent=2), '評価結果:'])
+        for key in ('precision', 'recall', 'map50', 'map50_95', 'training_seconds',
+                    'inference_ms_per_image', 'model_mib', 'device'):
+            sections.append(f'{key}: {record[key]}')
+        sections.extend(['クラス別評価:', json.dumps(record['classes'], ensure_ascii=False, indent=2),
+                         'epochごとの学習結果（タブ区切り）:'])
+        with open(runtime_path(run / 'results.csv'), newline='', encoding='utf-8') as handle:
+            sections.extend('\t'.join(value.strip() for value in row) for row in csv.reader(handle))
+    output = runtime_path(BASE / 'exports' / f'training_results_{created:%Y%m%d_%H%M%S_%f}.txt')
+    output.write_text('\n'.join(sections) + '\n', encoding='utf-8')
+    return output.name
+
+
 def download_selected(names):
     """Called only from an opt-in notebook cell; no external publication."""
     from google.colab import files
     for name in names:
-        if Path(name).name != name or Path(name).suffix not in ('.pt', '.onnx', '.csv'):
-            raise ValueError('Only explicitly selected pt/onnx/csv exports may be downloaded')
+        if Path(name).name != name or Path(name).suffix not in ('.pt', '.onnx', '.csv', '.txt'):
+            raise ValueError('Only explicitly selected pt/onnx/csv/txt exports may be downloaded')
         path = runtime_path(BASE / 'exports' / name)
         if not path.is_file():
             raise FileNotFoundError('Selected export does not exist')

@@ -676,6 +676,35 @@ class SyntheticRuntime(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Stale'):
             evaluator.comparison(self.base / 'exports/comparison.csv')
 
+    def test_results_txt_contains_selected_runs_and_japan_timestamp(self):
+        from datetime import datetime, timezone
+        for mode in ('vbox', 'hbox'):
+            best = self.make_evaluation(mode)
+            (best.parent.parent / 'results.csv').write_text('epoch, train/box_loss\n1, 0.25\n')
+        instant = datetime(2026, 11, 5, 18, 4, 3, 123456, tzinfo=timezone.utc)
+        with patch.object(evaluator, 'datetime') as clock:
+            clock.now.side_effect = lambda tz: instant.astimezone(tz)
+            name = evaluator.export_results_txt([trainer.TrainConfig(mode=mode) for mode in ('vbox', 'hbox')])
+        self.assertEqual(name, 'training_results_20261106_030403_123456.txt')
+        text = (self.base / 'exports' / name).read_text(encoding='utf-8')
+        self.assertIn('モード: vbox', text)
+        self.assertIn('モード: hbox', text)
+        self.assertIn('map50: 0.4', text)
+        self.assertIn('epoch\ttrain/box_loss\n1\t0.25', text)
+        files = SimpleNamespace(download=Mock())
+        with patch.dict('sys.modules', {'google.colab': SimpleNamespace(files=files)}):
+            evaluator.download_selected([name])
+        files.download.assert_called_once_with(str(self.base / 'exports' / name))
+
+    def test_results_txt_rejects_stale_or_missing_evaluation(self):
+        config = trainer.TrainConfig()
+        with self.assertRaises(FileNotFoundError):
+            evaluator.export_results_txt([config])
+        best = self.make_evaluation('vbox')
+        best.write_bytes(b'changed-synthetic')
+        with self.assertRaisesRegex(ValueError, 'Stale'):
+            evaluator.export_results_txt([config])
+
     def test_resume_and_checkpoint_guards(self):
         sizes, _ = dataset.inspect_dataset()
         converter.convert_dataset('vbox', sizes)
