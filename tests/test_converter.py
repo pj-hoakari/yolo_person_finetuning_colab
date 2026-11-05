@@ -837,7 +837,7 @@ class ProjectTests(unittest.TestCase):
         notebook = json.loads(path.read_text())
         self.assertTrue(notebook['metadata']['colab']['private_outputs'])
         headings = [c for c in notebook['cells'] if c['cell_type'] == 'markdown']
-        self.assertEqual(len(headings), 19)
+        self.assertEqual(len(headings), 18)
         for index, cell in enumerate(notebook['cells']):
             if cell['cell_type'] == 'code':
                 self.assertEqual(cell['outputs'], [])

@@ -24,7 +24,7 @@ class StandaloneNotebookTests(unittest.TestCase):
                     self.assertEqual(node.level, 0)
                     self.assertFalse((node.module or '').startswith('src'))
         headings = [''.join(c['source']) for c in notebook['cells'] if c['cell_type'] == 'markdown']
-        self.assertEqual(len(headings), 19)
+        self.assertEqual(len(headings), 18)
 
     def test_drive_cache_is_copied_to_content_before_processing(self):
         notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
@@ -49,10 +49,10 @@ class StandaloneNotebookTests(unittest.TestCase):
         self.assertIn('drive_runs_dir=DRIVE_CHECKPOINT_DIR', training)
         self.assertIn('checkpoint_status=show_saved_epoch', training)
 
-    def test_step_13_can_restore_without_steps_6_to_12(self):
+    def test_step_12_can_restore_without_steps_6_to_11(self):
         notebook = json.loads((ROOT / 'crowdhuman_finetuning.ipynb').read_text())
         heading = next(i for i, cell in enumerate(notebook['cells'])
-                       if ''.join(cell['source']).startswith('## 13.'))
+                       if ''.join(cell['source']).startswith('## 12.'))
         source = ''.join(notebook['cells'][heading + 1]['source'])
         definitions = {node.name for node in ast.parse(source).body
                        if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
