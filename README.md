@@ -227,9 +227,9 @@ DEBUGから本番への移行やデータ変更時は、該当`processed/<mode>`
 
 ### 出力とWebアプリへの接続
 
-セル17は既定で、選択したモードの学習設定・評価指標・クラス別評価・epochごとの損失と精度をまとめたUTF-8のTXTを生成します。ファイル名は`exports/training_results_YYYYMMDD_HHMMSS_ffffff.txt`で、セル実行時の日本時間とマイクロ秒を使います。手順14の評価が必要です。TXTだけなら手順16のモデル出力は不要です。`DO_DOWNLOAD=True`として明示実行するとダウンロードします。
+手順14で評価後、セル17を`DO_DOWNLOAD=True`にして実行すると、学習設定・精度・損失をTXTで取得できます。ファイル名は`training_results_YYYYMMDD_HHMMSS_ffffff.txt`（実行時の日本時間）です。TXTのみなら手順16は不要です。
 
-`exports/<mode>_<RUN_NAME>.pt`、`.onnx`、`_training.csv`、`comparison.csv`も`DOWNLOAD_NAMES`に指定して取得できます。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。DEBUGでは実験名に`_debug`が付きます。runディレクトリ一式をZIPにしないため、画像・ラベルの混入を避けられます。`files.download()`を呼ぶのはセル17でユーザーが明示指定した場合だけです。
+重み（`.pt`・`.onnx`）や学習・比較CSVは、`exports/`内のファイル名を`DOWNLOAD_NAMES`に指定して取得できます。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。DEBUGでは実験名に`_debug`が付きます。
 
 ONNXはopset 13、dynamic、FP32、simplify=Falseで出力します。`onnx.checker`とONNX Runtime CPUの合成ゼロ画像で検査し、`*_onnx_interface.json`に入出力名・dtype・shape・クラスを記録します。既存アプリのコード・モデル仕様はこの作業場所に提供されていないため、ブラウザ互換性は未検証です。
 
