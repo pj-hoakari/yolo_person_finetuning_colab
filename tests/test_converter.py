@@ -670,6 +670,32 @@ class SyntheticRuntime(unittest.TestCase):
         rows = evaluator.comparison(self.base / 'exports/comparison.csv')
         self.assertFalse(any(row['matched_conditions'] for row in rows))
 
+    def test_comparison_can_select_current_experiment(self):
+        self.make_evaluation('vbox')
+        stale = self.make_evaluation('hbox')
+        stale.write_bytes(b'changed-synthetic')
+        rows = evaluator.comparison(self.base / 'exports/comparison.csv', configs=[trainer.TrainConfig()])
+        self.assertEqual({row['mode'] for row in rows}, {'vbox'})
+
+    def test_history_uses_epoch_numbers_and_ignores_nonfinite_scores(self):
+        best = self.make_evaluation('vbox')
+        (best.parent.parent / 'results.csv').write_text(
+            ' epoch, metrics/mAP50-95(B), train/box_loss\n'
+            ' 5, 0.4, 0.5\n 6, nan, 0.4\n 7, 0.3, 0.2\n')
+        summary, rows = evaluator.training_history(trainer.TrainConfig())
+        self.assertEqual(summary['epochs_run'], 3)
+        self.assertEqual(summary['last_epoch'], 7)
+        self.assertEqual(summary['best_epoch_by_map50_95'], 5)
+        self.assertEqual(summary['best_map50_95'], .4)
+        self.assertEqual(rows[-1]['train/box_loss'], '0.2')
+
+    def test_available_exports_selects_only_current_runs_and_enabled_formats(self):
+        for name in ('vbox_experiment.pt', 'vbox_experiment.onnx', 'vbox_experiment_training.csv',
+                     'vbox_experiment_old.pt', 'hbox_other.pt', 'comparison.csv', 'training_results_old.txt'):
+            (self.base / 'exports' / name).touch()
+        self.assertEqual(evaluator.available_exports([trainer.TrainConfig()], include_onnx=False),
+                         ['vbox_experiment.pt', 'vbox_experiment_training.csv', 'comparison.csv'])
+
     def test_stale_evaluation(self):
         best = self.make_evaluation('vbox')
         best.write_bytes(b'changed-synthetic')
@@ -866,13 +892,12 @@ class ProjectTests(unittest.TestCase):
         notebook = json.loads(path.read_text())
         self.assertTrue(notebook['metadata']['colab']['private_outputs'])
         headings = [c for c in notebook['cells'] if c['cell_type'] == 'markdown']
-        self.assertEqual(len(headings), 18)
+        self.assertEqual(len(headings), 10)
         for index, cell in enumerate(notebook['cells']):
             if cell['cell_type'] == 'code':
                 self.assertEqual(cell['outputs'], [])
                 self.assertIsNone(cell['execution_count'])
                 compile(''.join(cell['source']), f'cell-{index}', 'exec')
-                self.assertEqual(notebook['cells'][index-1]['cell_type'], 'markdown')
 
     def test_source_privacy_policy(self):
         for path in (PROJECT / 'src').glob('*.py'):

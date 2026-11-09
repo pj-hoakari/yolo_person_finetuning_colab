@@ -27,13 +27,62 @@ def build():
     def code(text):
         cells.append({'cell_type': 'code', 'id': f'cell-{len(cells):02d}', 'metadata': {}, 'source': text.strip().splitlines(True), 'execution_count': None, 'outputs': []})
 
-    md('''# 1. CrowdHumanを用いたYOLO追加学習
-vboxは可視人物、hboxは頭部、bothは両方を学習します。データは非公開Driveに保管し、Colabで処理します。
-[データ利用条件](https://www.crowdhuman.org/download.html)（非商用の研究・教育用、画像再配布禁止）と[モデルのライセンス](https://www.ultralytics.com/license)、クラウド処理の可否を確認してください。
-Colab内のデータはランタイム終了で消えます。必要な結果は保存し、ノートブック共有前に出力を削除してください。
-実データでのGPU学習・アプリ接続は開発環境では未検証です。''')
-    md('''## 2. Colab実行環境とGPUの確認
-「ランタイム → ランタイムのタイプを変更」でGPUを選択します。GPUなしでは学習を開始できません。''')
+    md('''# 1. CrowdHumanでYOLOを追加学習
+手順2〜9を上から実行します。初回は手順2のDEBUG設定で確認してください。
+参考: [YOLO追加学習ノートブック](https://github.com/KasumiMercury/yolo_person_finetuning_colab/blob/main/yolo_person_finetuning.ipynb)。
+
+vboxは可視人物、hboxは頭部、bothは両方です。元データは非公開Drive、学習はColabのGPUで行います。
+[データ利用条件](https://www.crowdhuman.org/download.html)と[モデルのライセンス](https://www.ultralytics.com/license)、クラウド処理の可否を確認してください。
+Colab内のデータはランタイム終了で消えます。結果を取得し、共有前にノートブックの出力を削除してください。''')
+    md('''## 2. 設定
+GPUランタイムを選び、モード・学習回数・Drive保存先を設定します。利用条件の確認後、`TERMS_REVIEWED=True`にしてください。
+初回は`DEBUG_MODE=True`、`EPOCHS=1`で確認し、本学習ではDEBUGをFalseに戻して実験名を変えます。
+データ復元は`RESTORE_PREPARED_FROM_DRIVE=True`、学習再開は同じ条件・実験名で`RESUME=True`にして、手順3以降を実行します。''')
+    code('''# 学習
+MODES_TO_RUN = ['vbox']  # ['hbox'] / ['vbox', 'hbox'] / ['both']
+BASE_MODEL = 'yolo26n.pt'  # yolo26s.ptも選択可
+RUN_NAME = 'experiment'
+EPOCHS = 50
+BATCH_SIZE = 16
+IMAGE_SIZE = 640
+PATIENCE = 10
+WORKERS = 2
+SEED = 42
+DEBUG_MODE = False
+DEBUG_LIMIT = 32  # DEBUG時の各splitの画像数
+RESUME = False
+ALLOW_CPU = False  # 意図的なCPUテストのみTrue
+TERMS_REVIEWED = False
+
+# Driveとデータ
+DRIVE_MOUNT_POINT = '/content/drive'
+DRIVE_DATASET_DIR = '/content/drive/MyDrive/crowdhuman'
+DRIVE_PREPARED_DIR = '/content/drive/MyDrive/crowdhuman/prepared'
+DRIVE_CHECKPOINT_DIR = '/content/drive/MyDrive/crowdhuman/checkpoints'
+DOWNLOAD_MISSING_TO_DRIVE = True
+SAVE_PREPARED_TO_DRIVE = True  # 展開・変換済みデータの保存（追加容量が必要）
+RESTORE_PREPARED_FROM_DRIVE = False
+SAVE_EVERY_EPOCH_TO_DRIVE = True
+HF_DATASET_REPO = 'sshao0516/CrowdHuman'
+HF_DATASET_REVISION = 'd97203da87e348ea69f7a7633a57c21a956120a6'
+
+# 結果の表示・出力
+SHOW_LEARNING_CURVES = True  # 数値のグラフのみ
+EXPORT_MODELS = True  # TXTのみ必要ならFalse
+EXPORT_ONNX = True
+WEBAPP_CONTRACT = None
+DO_DOWNLOAD = False  # 手順9でダウンロードする場合True
+DOWNLOAD_RESULTS_TXT = True
+
+BASE_DIR = '/content/crowdhuman'
+EXPORT_DIR = f'{BASE_DIR}/exports'
+assert MODES_TO_RUN and len(set(MODES_TO_RUN)) == len(MODES_TO_RUN)
+assert all(mode in ('vbox', 'hbox', 'both') for mode in MODES_TO_RUN)
+assert DEBUG_LIMIT > 0
+print('設定完了:', MODES_TO_RUN, RUN_NAME)''')
+    md('''## 3. 環境準備とDrive接続
+ライブラリ・保存先を準備し、Driveを接続します。認証画面に従ってください。
+GPUなしでは停止します。インストール失敗時は`/content/crowdhuman/install.log`を確認します。''')
     code('''import os, sys, subprocess, warnings
 from pathlib import Path
 if 'google.colab' not in sys.modules:
@@ -50,12 +99,13 @@ os.environ.update(YOLO_CONFIG_DIR=str(BOOTSTRAP / 'config'), YOLO_OFFLINE='true'
                   WANDB_DISABLED='true', COMET_MODE='DISABLED', HF_HUB_OFFLINE='1')
 gpu = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], capture_output=True, text=True) if __import__('shutil').which('nvidia-smi') else None
 if gpu is None or gpu.returncode:
-    warnings.warn('GPUが見つかりません。GPUランタイムを選択してください。')
+    if not ALLOW_CPU:
+        raise RuntimeError('GPUランタイムを選択して再実行してください。')
+    warnings.warn('CPUテストとして実行します。')
 else:
-    print(gpu.stdout.strip())''')
-    md('''## 3. ライブラリのインストール
-必要なライブラリを導入します。失敗時は`/content/crowdhuman/install.log`を確認してください。
-依存ライブラリを変更したら、ランタイムを再起動して最初から実行します。''')
+    print(gpu.stdout.strip())
+if not TERMS_REVIEWED:
+    raise RuntimeError('利用条件を確認し、手順2のTERMS_REVIEWED=Trueを設定してください。')''')
     requirements = (ROOT / 'requirements.txt').read_text()
     code(f'''REQUIREMENTS = {requirements!r}
 requirements_path = BOOTSTRAP / 'requirements.txt'
@@ -65,148 +115,59 @@ with open(BOOTSTRAP / 'install.log', 'w') as log:
 if installed.returncode:
     raise RuntimeError('インストール失敗。ランタイム内のinstall.logを確認してください。')
 print('インストール完了')''')
-    md('''## 4. 学習設定
-学習モード・epoch数・batch・Drive保存先を指定します。初回は`DEBUG_MODE=True`、`EPOCHS=1`で確認してください。
-利用条件の確認後、`TERMS_REVIEWED=True`にします。本学習ではDEBUGをFalseに戻し、別の`RUN_NAME`を使います。
-データ復元は`RESTORE_PREPARED_FROM_DRIVE=True`にし、保存時と同じモード・DEBUG設定で手順2〜5→12へ進みます。
-中断した学習の再開は`RESUME=True`にします。データ・設定・依存バージョンは保存時と揃えてください。''')
-    code('''TRAIN_MODE = 'vbox'
-MODES_TO_RUN = [TRAIN_MODE]  # 比較例: ['vbox', 'hbox']; 3モード: ['vbox', 'hbox', 'both']
-BASE_MODEL = 'yolo26n.pt'
-EPOCHS = 50
-BATCH_SIZE = 16
-IMAGE_SIZE = 640
-SEED = 42
-DEBUG_MODE = False
-DEBUG_LIMIT = 32  # 各splitの先頭N画像。すべてのモードで同じ画像。
-RUN_NAME = 'experiment'
-RESUME = False  # 中断から再開する場合はTrue。Driveの最新保存を自動復元。
-SAVE_EVERY_EPOCH_TO_DRIVE = True
-DRIVE_CHECKPOINT_DIR = '/content/drive/MyDrive/crowdhuman/checkpoints'
-DRIVE_PREPARED_DIR = '/content/drive/MyDrive/crowdhuman/prepared'
-RESTORE_PREPARED_FROM_DRIVE = False  # 手順2〜5の後、12から復元・再開する場合True
-ALLOW_CPU = False
-TERMS_REVIEWED = False
-DRIVE_MOUNT_POINT = '/content/drive'
-DRIVE_DATASET_DIR = '/content/drive/MyDrive/crowdhuman'
-DOWNLOAD_MISSING_TO_DRIVE = True
-HF_DATASET_REPO = 'sshao0516/CrowdHuman'
-HF_DATASET_REVISION = 'd97203da87e348ea69f7a7633a57c21a956120a6'
-EXPORT_ONNX = True
-WEBAPP_CONTRACT = None  # 既存アプリから採取したinput/outputs辞書。未指定では互換性を確定しません。
-BASE_DIR = '/content/crowdhuman'
-RAW_DIR = f'{BASE_DIR}/raw'
-PROCESSED_DIR = f'{BASE_DIR}/processed'
-RUNS_DIR = f'{BASE_DIR}/runs'
-EXPORT_DIR = f'{BASE_DIR}/exports'
-assert TRAIN_MODE in ('vbox', 'hbox', 'both')
-assert MODES_TO_RUN and len(set(MODES_TO_RUN)) == len(MODES_TO_RUN)
-assert all(mode in ('vbox', 'hbox', 'both') for mode in MODES_TO_RUN)''')
-    md('''## 5. ディレクトリと非公開設定
-保存先を`/content/crowdhuman/`に準備し、外部の実験追跡・同期を無効にします。''')
     ignore_rules = (ROOT / '.gitignore').read_text()
     code(inline_source('privacy.py') + f'\n\nGITIGNORE_CONTENT = {ignore_rules!r}\n' + '''BASE = initialize(Path(BASE_DIR))
 with local_console(BASE / 'setup.log'):
     YOLO = private_yolo()
-print('ランタイム内の保存先とプライバシー設定を準備しました')''')
-    md('''## 6. Google Driveへ保管し、/contentへコピー
-Driveをマウントし、不足するZIP4個・ODGT2個をHugging Faceから取得します。
-既存ファイルはDriveの`raw/archives/`（ZIP）、`raw/annotations/`（ODGT）に置いてください。
-Colabへコピーして整合性を確認します。失敗時はDriveの`logs/download.jsonl`、Colabの`logs/drive_copy.jsonl`を確認してください。''')
-    code(inline_source('dataset.py') + '\n\n' + '''def mount_dataset_drive(mount_point):
+print('ランタイム内の保存先とプライバシー設定を準備しました')''' + '\n\n' + inline_source('dataset.py') + '\n\n' + inline_source('converter.py') + '\n\n' + inline_source('preparation.py') + '\n\n' + inline_source('checkpoints.py') + '\n\n' + inline_source('trainer.py') + '\n\n' + inline_source('evaluator.py') + '\n\n' + inline_source('workflow.py'))
+    code('''configs = [TrainConfig(mode=mode, model=BASE_MODEL, epochs=EPOCHS, batch=BATCH_SIZE,
+                       imgsz=IMAGE_SIZE, patience=PATIENCE, workers=WORKERS, seed=SEED,
+                       debug=DEBUG_MODE, run_name=RUN_NAME, allow_cpu=ALLOW_CPU)
+           for mode in MODES_TO_RUN]
+for config in configs:
+    config.validate()
+
+def mount_dataset_drive(mount_point):
     from google.colab import drive
     drive.mount(mount_point)
 
-if not TERMS_REVIEWED:
-    raise RuntimeError('利用条件とGoogle Drive・Colabでの保存・処理可否を確認し、TERMS_REVIEWED=Trueにしてください。')
 mount_dataset_drive(DRIVE_MOUNT_POINT)
-drive_dataset = Path(DRIVE_DATASET_DIR)
 mount_root = Path(DRIVE_MOUNT_POINT).absolute()
-if mount_root not in drive_dataset.absolute().parents:
-    raise ValueError('DRIVE_DATASET_DIRはマウントしたGoogle Drive配下を指定してください。')
-if DOWNLOAD_MISSING_TO_DRIVE:
-    with local_download_storage(drive_dataset):
-        for part in ('raw/archives', 'raw/annotations', 'logs'):
-            runtime_path(drive_dataset / part).mkdir(parents=True, exist_ok=True)
-        drive_log = download_huggingface(HF_DATASET_REPO, HF_DATASET_REVISION,
-                                         progress=DownloadProgress(notebook=True))
-        print('Driveへの保管完了。取得ログ:', drive_log)
-copy_log = copy_drive_dataset(drive_dataset, progress=DownloadProgress(notebook=True))
-print('Colabへのコピー・検証完了。ログ:', copy_log)''')
-    md('''## 7. ZIPの安全な解凍
-空き容量を確認し、画像を`raw/images/`へ展開します。正常な既存画像は再利用します。''')
-    code('''print(extract_archives())''')
-    md('''## 8. ODGTの解析と画像の検証
-画像の存在・サイズ・破損と、train/val間のID重複を確認します。DEBUGでも全データを検証します。''')
-    code('''image_sizes, split_counts = inspect_dataset()
-print({'validated_images': split_counts})''')
-    md('''## 9. YOLO形式への変換
-選択したモードのラベルを生成します。ignore対象は除外するため、CrowdHuman公式評価とは異なります。
-DEBUGから本学習へ切り替える際は、`processed/<mode>`を削除して再変換してください。''')
-    code(inline_source('converter.py') + '\n\n' + '''yaml_paths = {}
-for mode in MODES_TO_RUN:
-    yaml_paths[mode] = convert_dataset(mode, image_sizes, DEBUG_LIMIT if DEBUG_MODE else None)
-    report = __import__('json').loads((yaml_paths[mode].parent / 'conversion.json').read_text())
-    print(mode, report['counts'])''')
-    md('''## 10. 合成テストとアノテーションの検証
-合成データで変換をテストし、ラベルのクラス・座標・画像との対応を確認します。
-失敗時は`synthetic_tests.log`を確認してください。''')
+for directory in (DRIVE_DATASET_DIR, DRIVE_PREPARED_DIR, DRIVE_CHECKPOINT_DIR):
+    if mount_root not in Path(directory).absolute().parents:
+        raise ValueError('Drive保存先はマウント先の配下に指定してください。')
+print('環境準備・Drive接続完了')''')
+    md('''## 4. データ準備
+不足ファイルの取得、Colabへのコピー、展開、YOLO形式への変換をまとめて実行します。復元設定がTrueならDriveの準備済みデータを使います。
+準備済みデータを保存する場合は完了表示を待ってください。DEBUGと本学習の切替時は`processed/<mode>`を削除して再変換します。
+ignore対象は除外するため、評価方法はCrowdHuman公式と異なります。''')
     code((ROOT / 'tools/notebook_tests.py').read_text() + '\n\n' + '''suite = unittest.defaultTestLoader.loadTestsFromTestCase(NotebookSyntheticTests)
 with local_console(BASE / 'synthetic_tests.log'):
     result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise RuntimeError('合成テスト失敗。synthetic_tests.logを確認してください。')
-print({'synthetic_tests': result.testsRun, 'status': 'passed'})
-for mode in MODES_TO_RUN:
-    print(mode, validate_labels(yaml_paths[mode].parent, mode))''')
-    md('''## 11. data.yamlの確認とGoogle Driveへの進捗保存
-データ設定を確認し、展開画像・ラベルを`DRIVE_PREPARED_DIR`へ保存します。完了表示を待ってください。
-次回は`RESTORE_PREPARED_FROM_DRIVE=True`にして、手順2〜5→12で復元できます。''')
-    code(inline_source('preparation.py') + '\n\n' + '''for mode in MODES_TO_RUN:
-    report = validate_labels(yaml_paths[mode].parent, mode)
-    print({'mode': mode, 'data_yaml_valid': True, 'counts': report})
-if not TERMS_REVIEWED:
-    raise RuntimeError('利用条件を確認してください。')
-if Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_PREPARED_DIR).absolute().parents:
-    raise ValueError('DRIVE_PREPARED_DIRはマウントしたGoogle Drive配下に指定してください。')
-prepared_settings = {'modes': MODES_TO_RUN, 'debug': DEBUG_MODE, 'debug_limit': DEBUG_LIMIT if DEBUG_MODE else None}
-print('手順11までの進捗をDriveへ保存中です。完了までお待ちください。')
-prepared_archive = save_prepared_data(DRIVE_PREPARED_DIR, prepared_settings)
-print('手順11までのDrive保存完了:', str(prepared_archive))''')
-    md('''## 12. YOLOモデルの読み込み
-公式のYOLO26n重みを準備します。`BASE_MODEL`でYOLO26sも選択できます。
-データ復元を有効にした場合は、手順11の保存を照合・復元します。Colab側のデータ保存先は空にしてください。''')
-    code(inline_source('dataset.py') + '\n\n' + inline_source('converter.py') + '\n\n' + inline_source('preparation.py') + '\n\n' + '''if RESTORE_PREPARED_FROM_DRIVE:
-    if not TERMS_REVIEWED:
-        raise RuntimeError('利用条件を確認し、TERMS_REVIEWED=Trueにしてください。')
-    from google.colab import drive
-    drive.mount(DRIVE_MOUNT_POINT)
-    if Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_PREPARED_DIR).absolute().parents:
-        raise ValueError('DRIVE_PREPARED_DIRはマウントしたGoogle Drive配下に指定してください。')
-    prepared_settings = {'modes': MODES_TO_RUN, 'debug': DEBUG_MODE, 'debug_limit': DEBUG_LIMIT if DEBUG_MODE else None}
-    print('手順11の保存を照合・復元中です。完了までお待ちください。')
-    yaml_paths = restore_prepared_data(DRIVE_PREPARED_DIR, prepared_settings)
-    for mode in MODES_TO_RUN:
-        validate_labels(yaml_paths[mode].parent, mode)
-    print('手順11の保存を復元しました。12から続行します。')
-
-''' + inline_source('checkpoints.py') + '\n\n' + inline_source('trainer.py') + '\n\n' + '''if SAVE_EVERY_EPOCH_TO_DRIVE and Path(DRIVE_MOUNT_POINT).absolute() not in Path(DRIVE_CHECKPOINT_DIR).absolute().parents:
-    raise ValueError('DRIVE_CHECKPOINT_DIRはマウントしたGoogle Drive配下に指定してください。')
-configs = [TrainConfig(mode=mode, model=BASE_MODEL, epochs=EPOCHS, batch=BATCH_SIZE,
-                       imgsz=IMAGE_SIZE, seed=SEED, debug=DEBUG_MODE, run_name=RUN_NAME,
-                       allow_cpu=ALLOW_CPU) for mode in MODES_TO_RUN]
-for config in configs:
-    config.validate()
+print('合成テスト完了:', result.testsRun)''')
+    code('''yaml_paths = prepare_training_data(
+    modes=MODES_TO_RUN, debug=DEBUG_MODE, debug_limit=DEBUG_LIMIT,
+    drive_dataset_dir=DRIVE_DATASET_DIR, drive_prepared_dir=DRIVE_PREPARED_DIR,
+    hf_repo=HF_DATASET_REPO, hf_revision=HF_DATASET_REVISION,
+    restore=RESTORE_PREPARED_FROM_DRIVE, save_prepared=SAVE_PREPARED_TO_DRIVE,
+    download_missing=DOWNLOAD_MISSING_TO_DRIVE,
+    progress=DownloadProgress(notebook=True),
+)''')
+    md('''## 5. モデル準備
+公式の事前学習重みを準備します。再開時は手順6で保存済みの重みを復元します。''')
+    code('''for config in configs:
+    validate_labels(yaml_paths[config.mode].parent, config.mode)
 if not RESUME:
     with local_console(BASE / 'model_setup.log'):
         base_model = load_model(configs[0])
         del base_model
-print('モデル準備完了')''')
-    md('''## 13. 追加学習とチェックポイント管理
-選択したモードを学習し、結果を`runs/<mode>/<RUN_NAME>/`に保存します。詳細ログは`console.log`です。
-既定では毎epochの重み・設定・CSVをDriveへ保存し、保存失敗時は停止します。
-中断後は同じ条件で`RESUME=True`にすると、最後に保存したepochの次から再開します。
-GPUメモリ不足時はbatchを下げ、別の`RUN_NAME`で開始してください。''')
+print('モデル準備完了:', BASE_MODEL)''')
+    md('''## 6. 学習
+選択したモードを学習します。ログと重みは`runs/<mode>/<RUN_NAME>/`に保存します。
+既定で毎epochをDriveへ保存します。保存失敗時は停止し、中断後は最後の保存から再開できます。
+GPUメモリ不足時はbatchを下げ、別の実験名で開始してください。''')
     code('''checkpoint_display = None
 def show_saved_epoch(saved):
     global checkpoint_display
@@ -224,56 +185,48 @@ for config in configs:
                                       drive_runs_dir=DRIVE_CHECKPOINT_DIR if SAVE_EVERY_EPOCH_TO_DRIVE else None,
                                       checkpoint_status=show_saved_epoch)
     print(config.mode, '学習完了')''')
-    md('''## 14. 評価
-検証データでPrecision・Recall・mAP、学習時間、推論速度を測定します。
-推論速度はモデルのみの値で、アプリ全体の処理時間は含みません。''')
-    code(inline_source('evaluator.py') + '\n\n' + '''for config in configs:
-    print(evaluate(config))''')
-    md('''## 15. vbox・hboxの比較
-評価結果を`exports/comparison.csv`にまとめます。`matched_conditions`で実験条件の一致を確認できます。
-vboxとhboxは検出対象が異なるため、mAPだけで優劣を判断しないでください。''')
-    code('''comparison_rows = comparison()
-print({'comparison_csv': f'{EXPORT_DIR}/comparison.csv', 'rows': len(comparison_rows),
-       'matched_conditions': all(row['matched_conditions'] for row in comparison_rows)})
-for row in comparison_rows:
-    if row['scope'] == 'all':
-        print(row)''')
-    md('''## 16. モデルのエクスポート
-重み（PT・ONNX）と学習CSVを`exports/`へ出力します。
-ONNXはopset 13・FP32で検査し、入出力仕様を`*_onnx_interface.json`へ保存します。
-アプリとの互換性は別途確認してください。`WEBAPP_CONTRACT`を指定すると入出力仕様を照合できます。''')
-    code('''exported_names = []
+    md('''## 7. 学習結果と評価
+実行epoch数・mAPが最良のepoch・損失と精度のグラフを表示し、最良の重みを検証データで評価します。
+比較表は`exports/comparison.csv`に保存します。vboxとhboxは検出対象が異なるため、mAPだけで優劣を判断しないでください。''')
+    code('''evaluation_results = []
 for config in configs:
-    exported_names.extend(export_model(config, onnx_export=EXPORT_ONNX, contract=WEBAPP_CONTRACT))
-print({'exported': exported_names})''')
-    md('''## 17. 必要ファイルの明示ダウンロード
-手順14で評価後、`DO_DOWNLOAD=True`にして実行すると、学習設定・精度・損失をTXTで取得できます。
-ファイル名は`training_results_YYYYMMDD_HHMMSS_ffffff.txt`（日本時間）です。TXTのみなら手順16は不要です。
-出力済みの重み・CSVとTXTのファイル名は自動設定します。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。''')
-    code('''DO_DOWNLOAD = False
-DOWNLOAD_RESULTS_TXT = True
-DOWNLOAD_NAMES = [
-    name
-    for config in configs
-    for name in (f'{config.mode}_{config.run_dir.name}.pt',
-                 f'{config.mode}_{config.run_dir.name}.onnx',
-                 f'{config.mode}_{config.run_dir.name}_training.csv')
-    if (Path(EXPORT_DIR) / name).is_file()
-]
-if (Path(EXPORT_DIR) / 'comparison.csv').is_file():
+    summary, _ = training_history(config)
+    print(config.mode, '学習サマリー:', summary)
+    if SHOW_LEARNING_CURVES:
+        plot_training_history(config)
+    metrics = evaluate(config)
+    evaluation_results.append(metrics)
+    print(config.mode, '評価結果:', metrics)
+comparison_rows = comparison(output=Path(EXPORT_DIR) / 'comparison.csv', configs=configs)
+print('比較CSV:', str(Path(EXPORT_DIR) / 'comparison.csv'))
+print('比較条件の一致:', all(row['matched_conditions'] for row in comparison_rows))''')
+    md('''## 8. モデル出力（任意）
+`EXPORT_MODELS=True`でPT・学習CSV、`EXPORT_ONNX=True`でONNXも出力します。TXTのみならスキップできます。
+ONNXの入出力仕様はJSONに保存します。アプリとの互換性は別途確認してください。''')
+    code('''exported_names = []
+if EXPORT_MODELS:
+    for config in configs:
+        exported_names.extend(export_model(config, onnx_export=EXPORT_ONNX, contract=WEBAPP_CONTRACT))
+    print('出力完了:', exported_names)
+else:
+    print('モデル出力をスキップしました')''')
+    md('''## 9. 結果のダウンロード
+`DO_DOWNLOAD=True`で実行すると、日時付きTXTと出力済みの重み・CSVを取得できます。ファイル名は自動設定します。
+TXT名は`training_results_YYYYMMDD_HHMMSS_ffffff.txt`（日本時間）です。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。''')
+    code('''DOWNLOAD_NAMES = available_exports(configs, include_onnx=EXPORT_ONNX) if EXPORT_MODELS else []
+if not EXPORT_MODELS and (Path(EXPORT_DIR) / 'comparison.csv').is_file():
     DOWNLOAD_NAMES.append('comparison.csv')
 if DO_DOWNLOAD:
     if DOWNLOAD_RESULTS_TXT:
-        results_txt_name = export_results_txt(configs)
-        DOWNLOAD_NAMES.append(results_txt_name)
+        DOWNLOAD_NAMES.append(export_results_txt(configs))
     print('ダウンロード対象:', DOWNLOAD_NAMES)
     download_selected(DOWNLOAD_NAMES)
 else:
     print('出力済みファイル:', DOWNLOAD_NAMES)
-    print('DO_DOWNLOAD=TrueでTXTを生成してダウンロードします')''')
-    md('''## 18. 一時データの削除（任意）
-必要な結果を取得してから実行してください。`DELETE_DATA=True`でraw・processed、`DELETE_RUNS=True`で学習ログ・重みを削除します。
-Driveとexportsは残ります。rawを残して再変換する場合は、`processed/<mode>`だけを手動で削除してください。''')
+    print('手順2をDO_DOWNLOAD=Trueにして再実行後、このセルを実行してください')''')
+    md('''## 10. 一時データの削除（任意）
+結果の取得後に実行します。`DELETE_DATA=True`でraw・processed、`DELETE_RUNS=True`でログ・重みを削除します。
+Driveとexportsは残ります。rawを残して再変換する場合は`processed/<mode>`だけを手動で削除してください。''')
     code('''DELETE_DATA = False
 DELETE_RUNS = False
 import shutil
