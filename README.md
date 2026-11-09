@@ -62,7 +62,7 @@ requirements.txt
 3. 最初は`DEBUG_MODE=True`、`EPOCHS=1`、必要に応じてbatchを下げて確認します。DEBUGは各splitの先頭`DEBUG_LIMIT`画像を使います。全モードで同じ画像を選びます。ダウンロード容量・入力全体の検証量は減りません。
 4. セル6でDriveをマウントし、不足する元ファイルをHugging FaceからDriveへ保存して、`/content/crowdhuman/raw/`へコピーします。セル7〜11で展開・検証・変換・合成テストを実行します。画像IDやアノテーション自体は出力しません。
 5. セル12〜16でモデル準備、学習、評価、比較、モデル出力を行います。GPUがない場合は警告して停止します。意図的なCPUテストだけ`ALLOW_CPU=True`を指定できます。
-6. 手順14で評価後、セル17で`DO_DOWNLOAD=True`として実行すると、日時付きの学習結果TXTをダウンロードします。重みなども必要な場合は`DOWNLOAD_NAMES`に列挙します。
+6. 手順14で評価後、セル17で`DO_DOWNLOAD=True`として実行すると、日時付きの学習結果TXTと出力済みの重み・CSVをダウンロードします。ファイル名は自動設定されます。
 7. 必要な重みの取得を確認後、セル18の削除フラグを必要なものだけ有効にします。
 
 **ランタイム終了・リセットで、Colab内のコピー、展開画像、ラベル、ログ、チェックポイント、exportsは失われます。** Driveに保管した元ZIP・ODGTは残るため、次回はDriveから再コピーできます。手順11で展開・変換済みデータを保存し、手順12から復元できます。既定で毎epochの再開用チェックポイントもDriveへ保存します。配布・アプリ利用向けのPT/ONNX/CSVはセル16〜17で出力・取得してください。セル18の削除対象もColab側だけです。
@@ -229,7 +229,7 @@ DEBUGから本番への移行やデータ変更時は、該当`processed/<mode>`
 
 手順14で評価後、セル17を`DO_DOWNLOAD=True`にして実行すると、学習設定・精度・損失をTXTで取得できます。ファイル名は`training_results_YYYYMMDD_HHMMSS_ffffff.txt`（実行時の日本時間）です。TXTのみなら手順16は不要です。
 
-重み（`.pt`・`.onnx`）や学習・比較CSVは、`exports/`内のファイル名を`DOWNLOAD_NAMES`に指定して取得できます。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。DEBUGでは実験名に`_debug`が付きます。
+`DOWNLOAD_NAMES`には、選択した実験の出力済み重み（`.pt`・`.onnx`）・学習CSVと、比較CSVが自動設定されます。TXTも生成時に追加されます。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。DEBUGでは実験名に`_debug`が付きます。
 
 ONNXはopset 13、dynamic、FP32、simplify=Falseで出力します。`onnx.checker`とONNX Runtime CPUの合成ゼロ画像で検査し、`*_onnx_interface.json`に入出力名・dtype・shape・クラスを記録します。既存アプリのコード・モデル仕様はこの作業場所に提供されていないため、ブラウザ互換性は未検証です。
 

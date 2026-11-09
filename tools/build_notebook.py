@@ -249,19 +249,28 @@ print({'exported': exported_names})''')
     md('''## 17. 必要ファイルの明示ダウンロード
 手順14で評価後、`DO_DOWNLOAD=True`にして実行すると、学習設定・精度・損失をTXTで取得できます。
 ファイル名は`training_results_YYYYMMDD_HHMMSS_ffffff.txt`（日本時間）です。TXTのみなら手順16は不要です。
-重みなどは`DOWNLOAD_NAMES`に指定します。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。''')
+出力済みの重み・CSVとTXTのファイル名は自動設定します。TXTが不要なら`DOWNLOAD_RESULTS_TXT=False`にします。''')
     code('''DO_DOWNLOAD = False
 DOWNLOAD_RESULTS_TXT = True
-DOWNLOAD_NAMES = []  # 例: ['vbox_experiment.pt', 'comparison.csv']
+DOWNLOAD_NAMES = [
+    name
+    for config in configs
+    for name in (f'{config.mode}_{config.run_dir.name}.pt',
+                 f'{config.mode}_{config.run_dir.name}.onnx',
+                 f'{config.mode}_{config.run_dir.name}_training.csv')
+    if (Path(EXPORT_DIR) / name).is_file()
+]
+if (Path(EXPORT_DIR) / 'comparison.csv').is_file():
+    DOWNLOAD_NAMES.append('comparison.csv')
 if DO_DOWNLOAD:
-    names_to_download = list(DOWNLOAD_NAMES)
     if DOWNLOAD_RESULTS_TXT:
         results_txt_name = export_results_txt(configs)
-        names_to_download.append(results_txt_name)
-        print('学習結果TXT:', results_txt_name)
-    download_selected(names_to_download)
+        DOWNLOAD_NAMES.append(results_txt_name)
+    print('ダウンロード対象:', DOWNLOAD_NAMES)
+    download_selected(DOWNLOAD_NAMES)
 else:
-    print('ダウンロード未実行')''')
+    print('出力済みファイル:', DOWNLOAD_NAMES)
+    print('DO_DOWNLOAD=TrueでTXTを生成してダウンロードします')''')
     md('''## 18. 一時データの削除（任意）
 必要な結果を取得してから実行してください。`DELETE_DATA=True`でraw・processed、`DELETE_RUNS=True`で学習ログ・重みを削除します。
 Driveとexportsは残ります。rawを残して再変換する場合は、`processed/<mode>`だけを手動で削除してください。''')
