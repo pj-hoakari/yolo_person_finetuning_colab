@@ -1,11 +1,13 @@
-"""学習設定・保存無効化・NaN停止・ログZIPの検証。
+"""合成テンソルによる自動保存・再開・NaN停止・ログZIPの検証。
 
 PyTorchとPyYAMLのある環境で python tests/verify_training_cell.py を実行。
-Trainerは代替クラスを使用し、実際のモデル学習・推論は実行しません。
+Trainerは代替クラスを使用し、実モデルの学習・推論は実行しません。
 """
 import ast
+from copy import deepcopy
 import csv
 from datetime import datetime, timezone, timedelta
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -19,7 +21,6 @@ import zipfile
 import torch
 import yaml
 
-
 NOTEBOOK = json.loads((Path(__file__).resolve().parents[1] / 'yolo_person_finetuning.ipynb').read_text())
 
 
@@ -29,17 +30,25 @@ def load_definitions(cell_id, namespace):
     exec(compile(ast.Module(body=definitions, type_ignores=[]), cell_id, 'exec'), namespace)
 
 
+def sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def atomic_text(path, text):
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(text, encoding='utf-8')
+    temporary.replace(path)
+
+
 class RecordingDetectionTrainer:
     def __init__(self, *, overrides):
         self.overrides = overrides
+        self.args = SimpleNamespace(**overrides)
         self.callbacks = {}
         self.save_dir = Path(overrides['project']) / overrides['name']
 
     def add_callback(self, event, callback):
         self.callbacks[event] = callback
-
-    def save_model(self):
-        raise AssertionError('標準の重み保存が呼び出されました')
 
 
 class TrainingCellTest(unittest.TestCase):
@@ -54,52 +63,177 @@ class TrainingCellTest(unittest.TestCase):
             (data / name).write_text('{}')
         pretrained = self.root / 'initial.pt'
         pretrained.write_bytes(b'pretrained placeholder')
-        self.args = (data / 'data.yaml', pretrained, self.root / 'local',
+        self.args = (data / 'data.yaml', pretrained, self.root / 'drive', self.root / 'local',
                      'test_run', 20, 640, 8, 2)
-        self.ns = dict(torch=torch, yaml=yaml, Path=Path,
+        self.ns = dict(torch=torch, yaml=yaml, Path=Path, hashlib=hashlib, json=json,
+                       math=math, shutil=shutil, deepcopy=deepcopy, datetime=datetime,
+                       sha256_file=sha256_file, atomic_text=atomic_text,
+                       unwrap_model=lambda model: model,
                        ultralytics=SimpleNamespace(__version__='8.4.0'),
                        DetectionTrainer=RecordingDetectionTrainer)
         load_definitions('training', self.ns)
+        self.run = self.root / 'drive' / 'test_run'
 
-    def test_new_training_uses_same_optimization_settings_without_checkpoint_io(self):
-        with patch.object(torch, 'load', side_effect=AssertionError('チェックポイントを読み込んだ')):
-            with patch.object(torch, 'save', side_effect=AssertionError('重みを保存した')):
-                trainer = self.ns['create_training'](*self.args, require_cuda=False)
-                # 標準側から最終エポックに保存を要求されても、重みを書き出しません。
-                trainer.save_model()
-        self.assertEqual(trainer.overrides, {
-            'model': str(self.args[1].resolve()), 'data': str(self.args[0].resolve()),
-            'project': str(self.args[2].resolve()), 'name': 'test_run', 'exist_ok': False,
-            'epochs': 20, 'imgsz': 640, 'batch': 8, 'workers': 2, 'device': 0,
-            'optimizer': 'AdamW', 'lr0': 0.001, 'seed': 0, 'patience': 0,
-            'val': True, 'plots': True, 'amp': True, 'cache': False, 'close_mosaic': 10,
-            'save': False, 'save_period': -1, 'resume': False,
-        })
-        self.assertEqual(set(trainer.callbacks), {'on_train_batch_end', 'on_train_epoch_end'})
-        self.assertFalse(self.args[2].exists())
-
-    def test_nan_and_inf_stop_training(self):
+    def trainer(self, epoch=0):
         trainer = self.ns['create_training'](*self.args, require_cuda=False)
-        for field in ('loss', 'loss_items', 'tloss'):
-            for abnormal in (float('nan'), float('inf')):
-                state = SimpleNamespace(epoch=1, loss=torch.tensor(1.),
-                                        loss_items=torch.tensor([1., 2., 3.]), tloss=torch.tensor([1., 2., 3.]))
-                setattr(state, field, torch.tensor([1., abnormal]))
-                for callback in trainer.callbacks.values():
-                    with self.subTest(field=field, abnormal=abnormal):
-                        with self.assertRaises(FloatingPointError):
-                            callback(state)
-        state = SimpleNamespace(epoch=0, loss=torch.tensor(1.),
-                                loss_items=torch.tensor([1., 2., 3.]), tloss=torch.tensor([1., 2., 3.]))
-        for callback in trainer.callbacks.values():
-            callback(state)
+        trainer.epoch = epoch
+        trainer.loss = torch.tensor(1.)
+        trainer.loss_items = trainer.tloss = torch.tensor([1., 2., 3.])
+        trainer.model = torch.nn.Linear(1, 1)
+        with torch.no_grad():
+            trainer.model.weight.fill_(100_000.)
+        trainer.ema = SimpleNamespace(ema=deepcopy(trainer.model), updates=50)
+        with torch.no_grad():
+            trainer.ema.ema.weight.fill_(90_000.)
+        state = {'state': {0: {'step': torch.tensor(5.), 'exp_avg': torch.tensor([1e-4]),
+                               'exp_avg_sq': torch.tensor([1e-12])}}, 'param_groups': []}
+        trainer.optimizer = SimpleNamespace(state_dict=lambda: state)
+        trainer.scaler = SimpleNamespace(state_dict=lambda: {'scale': 512.})
+        trainer.last = trainer.save_dir / 'weights' / 'last.pt'
+        trainer.best = trainer.save_dir / 'weights' / 'best.pt'
+        trainer.csv = trainer.save_dir / 'results.csv'
+        trainer.csv.write_text('epoch,loss\n1,1\n')
+        (trainer.save_dir / 'args.yaml').write_text('epochs: 20\n')
+        trainer.best_fitness = trainer.fitness = 0.5
+        trainer.metrics = {'metrics/mAP50-95(B)': 0.5}
+        trainer.read_results_csv = lambda: {'epoch': [1]}
+        return trainer
 
-    def test_archives_local_logs_without_weights_or_drive_copy(self):
+    def commit(self, trainer):
+        trainer.save_model()
+        trainer.callbacks['on_model_save'](trainer)
+
+    def test_settings_and_fp32_save(self):
+        trainer = self.trainer()
+        self.assertEqual(trainer.overrides['optimizer'], 'AdamW')
+        self.assertEqual(trainer.overrides['lr0'], 0.001)
+        self.assertTrue(trainer.overrides['amp'])
+        self.assertEqual(trainer.overrides['patience'], 0)
+        self.assertTrue(trainer.overrides['save'])
+        self.assertFalse(trainer.overrides['resume'])
+        self.commit(trainer)
+        snapshot = self.run / 'epochs/epoch_000001'
+        checkpoint = torch.load(snapshot / 'checkpoint.pt', map_location='cpu', weights_only=False)
+        self.assertEqual(checkpoint['ema'].weight.dtype, torch.float32)
+        self.assertEqual(checkpoint['ema'].weight.item(), 90_000.)
+        self.assertEqual(checkpoint['training_model_state']['weight'].item(), 100_000.)
+        moment = checkpoint['optimizer']['state'][0]['exp_avg_sq']
+        self.assertEqual(moment.dtype, torch.float32)
+        torch.testing.assert_close(moment, torch.tensor([1e-12]), rtol=0, atol=0)
+        self.assertEqual(checkpoint['scaler'], {'scale': 512.})
+        self.assertEqual(json.loads((self.run / 'latest.json').read_text())['completed_epochs'], 1)
+
+    def test_resume_restores_training_model_separately_from_ema(self):
+        trainer = self.trainer()
+        self.commit(trainer)
+        # ランタイムのローカル出力が失われた状態を再現。
+        (self.root / 'local').rename(self.root / 'previous_session')
+        resumed = self.ns['create_training'](*self.args, require_cuda=False)
+        self.assertEqual(resumed.overrides['resume'], str(resumed.save_dir / 'weights/last.pt'))
+        resumed.model = torch.nn.Linear(1, 1)
+        resumed.callbacks['on_pretrain_routine_end'](resumed)
+        self.assertEqual(resumed.model.weight.item(), 100_000.)
+        checkpoint = torch.load(resumed.save_dir / 'weights/last.pt', map_location='cpu', weights_only=False)
+        self.assertEqual(checkpoint['ema'].weight.item(), 90_000.)
+        self.assertTrue((resumed.save_dir / 'results.csv').is_file())
+
+    def test_nan_or_inf_never_advances_latest(self):
+        trainer = self.trainer()
+        self.commit(trainer)
+        latest = (self.run / 'latest.json').read_bytes()
+        trainer.epoch = 1
+        for key in ('loss', 'loss_items', 'tloss'):
+            original = getattr(trainer, key)
+            for abnormal in (float('nan'), float('inf')):
+                setattr(trainer, key, torch.tensor([1., abnormal]))
+                with self.assertRaises(FloatingPointError):
+                    trainer.callbacks['on_train_batch_end'](trainer)
+                with self.assertRaises(FloatingPointError):
+                    trainer.callbacks['on_model_save'](trainer)
+            setattr(trainer, key, original)
+        trainer.optimizer.state_dict()['state'][0]['exp_avg_sq'].fill_(float('nan'))
+        before = trainer.last.read_bytes()
+        with self.assertRaises(FloatingPointError):
+            trainer.save_model()
+        self.assertEqual(trainer.last.read_bytes(), before)
+        self.assertEqual((self.run / 'latest.json').read_bytes(), latest)
+        self.assertFalse((self.run / 'epochs/epoch_000002').exists())
+
+    def test_save_failures_keep_latest(self):
+        trainer = self.trainer()
+        self.commit(trainer)
+        latest = (self.run / 'latest.json').read_bytes()
+        trainer.epoch = 1
+        with patch.object(torch, 'save', side_effect=IOError('local save failure')):
+            with self.assertRaisesRegex(IOError, 'local save failure'):
+                trainer.save_model()
+        original_copy = self.ns['copy_verified']
+
+        def fail_copy(source, target):
+            if 'epoch_000002' in str(target) and target.name == 'best.pt':
+                raise IOError('Drive copy failure')
+            return original_copy(source, target)
+
+        trainer.save_model()
+        with patch.dict(self.ns, copy_verified=fail_copy):
+            with self.assertRaisesRegex(IOError, 'Drive copy failure'):
+                trainer.callbacks['on_model_save'](trainer)
+        self.assertEqual((self.run / 'latest.json').read_bytes(), latest)
+        resumed = self.ns['create_training'](*self.args, require_cuda=False)
+        checkpoint = torch.load(resumed.save_dir / 'weights/last.pt', map_location='cpu', weights_only=False)
+        self.assertEqual(checkpoint['epoch'], 0)
+
+    def test_completed_run_and_config_change(self):
+        trainer = self.trainer(epoch=19)
+        self.commit(trainer)
+        self.assertIsNone(self.ns['create_training'](*self.args, require_cuda=False))
+        changed = list(self.args)
+        changed[5] = 21
+        with self.assertRaisesRegex(RuntimeError, '別設定'):
+            self.ns['create_training'](*changed, require_cuda=False)
+
+    def test_nonfinite_checkpoint_rejected_even_when_hash_matches(self):
+        trainer = self.trainer()
+        self.commit(trainer)
+        snapshot = self.run / 'epochs/epoch_000001'
+        path = snapshot / 'checkpoint.pt'
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        checkpoint['training_model_state']['weight'].fill_(float('inf'))
+        torch.save(checkpoint, path)
+        metadata = json.loads((snapshot / 'snapshot.json').read_text())
+        metadata['files']['checkpoint.pt'] = sha256_file(path)
+        (snapshot / 'snapshot.json').write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(FloatingPointError, '再開前.training_model_state'):
+            self.ns['create_training'](*self.args, require_cuda=False)
+
+    def test_previous_best_preserved_and_final_artifacts_saved(self):
+        trainer = self.trainer()
+        self.commit(trainer)
+        best_bytes = trainer.best.read_bytes()
+        trainer.epoch = 1
+        trainer.fitness = 0.3
+        trainer.save_model()
+        self.assertEqual(trainer.best.read_bytes(), best_bytes)
+        trainer.callbacks['on_model_save'](trainer)
+        trainer.callbacks['on_train_end'](trainer)
+        self.assertTrue((self.run / 'final/weights/best.pt').is_file())
+        self.assertTrue((self.run / 'final/results.csv').is_file())
+        self.assertEqual(json.loads((self.run / 'final/completed.json').read_text())['completed_epochs'], 2)
+
+    def test_corrupt_file_rejected_by_hash(self):
+        trainer = self.trainer()
+        self.commit(trainer)
+        path = self.run / 'epochs/epoch_000001/checkpoint.pt'
+        with path.open('ab') as stream:
+            stream.write(b'corrupt')
+        with self.assertRaisesRegex(IOError, '検証に失敗'):
+            self.ns['create_training'](*self.args, require_cuda=False)
+
+    def test_archives_local_logs(self):
         logs = self.root / 'local_logs'
         logs.mkdir()
         (logs / 'args.yaml').write_text('epochs: 20\ndata: /data/data.yaml\n')
         (logs / 'results.csv').write_text('epoch, metrics/mAP50-95(B), train/box_loss\n1,0.7,2\n2,0.3,1\n')
-        (logs / 'results.png').write_bytes(b'plot')
         ns = dict(Path=Path, datetime=datetime, timezone=timezone, timedelta=timedelta,
                   csv=csv, json=json, math=math, shutil=shutil, tempfile=tempfile, yaml=yaml)
         load_definitions('download-results', ns)
@@ -107,15 +241,9 @@ class TrainingCellTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, archive.parent)
         with zipfile.ZipFile(archive) as zipped:
             self.assertIsNone(zipped.testzip())
-            names = zipped.namelist()
-            self.assertIn('results.png', names)
-            self.assertFalse(any(name.endswith('.pt') for name in names))
-            summary = json.loads(zipped.read(next(name for name in names if name.startswith('summary_'))))
+            summary = json.loads(zipped.read(next(name for name in zipped.namelist() if name.startswith('summary_'))))
             self.assertEqual(summary['total_epochs_run'], 2)
             self.assertEqual(summary['best_epoch'], 1)
-            self.assertEqual(summary['last_epoch'], 2)
-            self.assertTrue(any(name.startswith('args_') and name.endswith('.txt') for name in names))
-        self.assertEqual({path.name for path in logs.iterdir()}, {'args.yaml', 'results.csv', 'results.png'})
 
 
 if __name__ == '__main__':
