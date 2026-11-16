@@ -50,6 +50,18 @@ class RecordingDetectionTrainer:
     def add_callback(self, event, callback):
         self.callbacks[event] = callback
 
+    def validate(self):
+        # 8.4.0のValidatorと同じEMAのdtype変換。推論や学習は実行しません。
+        model = self.ema.ema
+        model.half() if self.amp else model.float()
+        model.float()
+        return {'metrics/mAP50-95(B)': 0.5}, 0.5
+
+    def run_callbacks(self, event):
+        callback = self.callbacks.get(event)
+        if callback is not None:
+            callback(self)
+
 
 class TrainingCellTest(unittest.TestCase):
     def setUp(self):
@@ -136,6 +148,144 @@ class TrainingCellTest(unittest.TestCase):
         checkpoint = torch.load(resumed.save_dir / 'weights/last.pt', map_location='cpu', weights_only=False)
         self.assertEqual(checkpoint['ema'].weight.item(), 90_000.)
         self.assertTrue((resumed.save_dir / 'results.csv').is_file())
+
+    def test_save_and_finalization_preserve_original_dtypes_and_values(self):
+        trainer = self.trainer()
+        trainer.model.double()
+        trainer.ema.ema.double()
+        trainer.ema.ema.register_buffer('half_buffer', torch.tensor([0.125], dtype=torch.float16))
+        trainer.ema.ema.register_buffer('counter', torch.tensor([3], dtype=torch.int64))
+        state = trainer.optimizer.state_dict()['state'][0]
+        state['exp_avg_sq'] = state['exp_avg_sq'].double()
+        expected = deepcopy(trainer.ema.ema.state_dict())
+        self.commit(trainer)
+        checkpoint = torch.load(trainer.last, map_location='cpu', weights_only=False)
+        self.assertEqual(checkpoint['resume_precision'], 'preserved')
+        self.assertEqual(checkpoint['training_model_state']['weight'].dtype, torch.float64)
+        self.assertEqual(checkpoint['optimizer']['state'][0]['exp_avg_sq'].dtype, torch.float64)
+        for name, value in checkpoint['ema'].state_dict().items():
+            self.assertEqual(value.dtype, expected[name].dtype)
+            torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+        self.ns['finalize_checkpoint'](trainer.last)
+        finalized = torch.load(trainer.last, map_location='cpu', weights_only=False)
+        for name, value in finalized['model'].state_dict().items():
+            self.assertEqual(value.dtype, expected[name].dtype)
+            torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+
+    def test_saving_does_not_mutate_live_training_state(self):
+        trainer = self.trainer()
+        trainer.model.register_buffer('running_value', torch.tensor([0.1, 0.2]))
+        states = {
+            'model': trainer.model.state_dict(),
+            'ema': trainer.ema.ema.state_dict(),
+            'optimizer': trainer.optimizer.state_dict(),
+            'scaler': trainer.scaler.state_dict(),
+        }
+        before = deepcopy(states)
+        rng_before = torch.get_rng_state().clone()
+        flags = (trainer.model.training, trainer.ema.ema.training)
+        self.commit(trainer)
+
+        def assert_same(left, right):
+            if isinstance(left, torch.Tensor):
+                torch.testing.assert_close(left, right, rtol=0, atol=0)
+                self.assertEqual(left.dtype, right.dtype)
+                self.assertEqual(left.device, right.device)
+            elif isinstance(left, dict):
+                self.assertEqual(left.keys(), right.keys())
+                for key in left:
+                    assert_same(left[key], right[key])
+            elif isinstance(left, (tuple, list)):
+                self.assertEqual(len(left), len(right))
+                for a, b in zip(left, right):
+                    assert_same(a, b)
+            else:
+                self.assertEqual(left, right)
+
+        assert_same(before, states)
+        self.assertTrue(torch.equal(rng_before, torch.get_rng_state()))
+        self.assertEqual(flags, (trainer.model.training, trainer.ema.ema.training))
+
+    def test_fp16_validation_overflow_reproduced_and_fixed(self):
+        trainer = self.trainer()
+        trainer.ema.ema.add_module('bn', torch.nn.BatchNorm1d(1))
+        trainer.ema.ema.bn.running_var.fill_(100_000.)
+        trainer.amp = True
+        unprotected = SimpleNamespace(ema=deepcopy(trainer.ema), amp=True)
+        RecordingDetectionTrainer.validate(unprotected)
+        self.assertTrue(torch.isinf(unprotected.ema.ema.bn.running_var).all())
+        expected = deepcopy(trainer.ema.ema.state_dict())
+        trainer.validate()
+        for name, value in trainer.ema.ema.state_dict().items():
+            torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+        self.assertTrue(trainer.amp)
+        self.assertTrue(trainer.args.amp)
+        self.commit(trainer)
+        checkpoint = torch.load(trainer.last, map_location='cpu', weights_only=False)
+        self.assertEqual(checkpoint['ema'].bn.running_var.item(), 100_000.)
+        self.assertEqual(checkpoint['ema'].bn.running_var.dtype, torch.float32)
+
+    def test_training_amp_restored_after_validation_error(self):
+        trainer = self.trainer()
+        trainer.amp = True
+        with patch.object(RecordingDetectionTrainer, 'validate', side_effect=RuntimeError('validation failure')):
+            with self.assertRaisesRegex(RuntimeError, 'validation failure'):
+                trainer.validate()
+        self.assertTrue(trainer.amp)
+        self.assertTrue(trainer.args.amp)
+
+    def test_final_eval_does_not_half_cast_batchnorm_statistics(self):
+        trainer = self.trainer()
+        trainer.ema.ema.add_module('bn', torch.nn.BatchNorm1d(1))
+        trainer.ema.ema.bn.running_var.fill_(100_000.)
+        self.commit(trainer)
+
+        class RecordingValidator:
+            args = SimpleNamespace(half=True, plots=False, compile=True)
+
+            def __call__(self, *, model):
+                self.checkpoint = torch.load(model, map_location='cpu', weights_only=False)
+                return {'fitness': 0.5, 'metrics/mAP50-95(B)': 0.5}
+
+        trainer.validator = RecordingValidator()
+        trainer.final_eval()
+        trainer.callbacks['on_train_end'](trainer)
+        for name in ('best.pt', 'last.pt'):
+            path = self.run / 'final/weights' / name
+            checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+            self.assertEqual(checkpoint['model'].bn.running_var.item(), 100_000.)
+            self.assertEqual(checkpoint['model'].bn.running_var.dtype, torch.float32)
+            self.assertIsNone(checkpoint['optimizer'])
+            self.assertNotIn('training_model_state', checkpoint)
+        self.assertFalse(trainer.validator.args.half)
+        # 再開用のDriveスナップショットは最終処理後も残ります。
+        checkpoint = torch.load(self.run / 'epochs/epoch_000001/checkpoint.pt',
+                                map_location='cpu', weights_only=False)
+        self.assertIsNotNone(checkpoint['optimizer'])
+
+    def test_live_and_copy_anomalies_are_distinguished(self):
+        trainer = self.trainer()
+        with torch.no_grad():
+            trainer.ema.ema.weight.fill_(float('inf'))
+        with self.assertRaisesRegex(FloatingPointError, r'保存開始前.ema.weight.*Inf=1'):
+            trainer.save_model()
+        self.assertFalse(trainer.last.exists())
+        with torch.no_grad():
+            trainer.ema.ema.weight.fill_(90_000.)
+
+        def corrupted_copy(value):
+            copied = deepcopy(value)
+            if isinstance(copied, torch.nn.Module):
+                with torch.no_grad():
+                    copied.weight.fill_(float('nan'))
+            return copied
+
+        with patch.dict(self.ns, deepcopy=corrupted_copy):
+            with self.assertRaisesRegex(FloatingPointError, r'保存用コピー.ema.weight.*NaN=1'):
+                trainer.save_model()
+        self.assertEqual(trainer.ema.ema.weight.item(), 90_000.)
+        self.assertFalse(trainer.last.exists())
+        self.assertFalse((self.run / 'latest.json').exists())
 
     def test_nan_or_inf_never_advances_latest(self):
         trainer = self.trainer()
