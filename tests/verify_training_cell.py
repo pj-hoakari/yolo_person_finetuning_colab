@@ -1,131 +1,122 @@
-"""合成画像を使ったCPU上の学習・保存・再開の統合検証。
+"""学習設定・保存無効化・NaN停止・ログZIPの検証。
 
-uv run --no-project --index https://download.pytorch.org/whl/cpu \
-    --with ultralytics==8.4.0 --with torch==2.9.1+cpu \
-    --with torchvision==0.24.1+cpu --with tqdm python tests/verify_training_cell.py
-
-公式の事前学習重みは取得せず、ランダム初期化した実YOLO26nを使います。
+PyTorchとPyYAMLのある環境で python tests/verify_training_cell.py を実行。
+Trainerは代替クラスを使用し、実際のモデル学習・推論は実行しません。
 """
-import os
-os.environ['OMP_NUM_THREADS']='1'
-os.environ['MKL_NUM_THREADS']='1'
+import ast
 import csv
+from datetime import datetime, timezone, timedelta
 import json
-import tempfile
+import math
 from pathlib import Path
+import shutil
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import zipfile
 
 import torch
-torch.set_num_threads(1)
-from PIL import Image
-from ultralytics import YOLO
-import ultralytics.data.utils as data_utils
-# 図用フォントの取得だけ無効化。モデル・学習・検証・チェックポイント処理は実物を使います。
-data_utils.check_font=lambda *a,**kw: None
+import yaml
 
-notebook=json.loads((Path(__file__).resolve().parents[1] / 'yolo_person_finetuning.ipynb').read_text())
-prepare=''.join(next(c for c in notebook['cells'] if c['id']=='dataset-prepare')['source'])
-prepare=prepare.removesuffix('\nDATA_YAML = prepare_dataset(DATA_DIR, OUTPUT_DIR)\n')
-source=''.join(next(c for c in notebook['cells'] if c['id']=='training')['source'])
-source=source[:source.index('\nTRAINED_WEIGHTS = run_training(')]
-ns={}
-exec(prepare,ns)
-exec(source,ns)
-train=ns['run_training']
 
-with tempfile.TemporaryDirectory(prefix='training_cell_test_') as temporary:
- root=Path(temporary)
- dataset=root/'data'
- for split in ('train','val'):
-  for kind in ('images','labels'):
-   (dataset/kind/split).mkdir(parents=True)
-  for index in range(2):
-   Image.new('RGB',(64,64),(30+index*50,60,90)).save(dataset/'images'/split/f'{index}.jpg')
-   (dataset/'labels'/split/f'{index}.txt').write_text('0 0.5 0.5 0.6 0.8\n1 0.5 0.25 0.2 0.2\n')
- (dataset/'.build_config.json').write_text('{"synthetic":true}')
- (dataset/'preparation_report.json').write_text('{"synthetic":true}')
- yaml_path=dataset/'data.yaml'
- yaml_path.write_text(f'path: {json.dumps(str(dataset))}\ntrain: images/train\nval: images/val\nnames:\n  0: person\n  1: head\n')
- pretrained=root/'initial.pt'
- YOLO('yolo26n.yaml').save(pretrained)
- args=(yaml_path,pretrained,root/'drive_runs',root/'local_runs','resume_test',2,64,2,0)
- kw=dict(device='cpu',amp=False,plots=False,require_cuda=False)
+NOTEBOOK = json.loads((Path(__file__).resolve().parents[1] / 'yolo_person_finetuning.ipynb').read_text())
 
- original_add=YOLO.add_callback
- def interrupted_add(self,event,callback):
-  if event=='on_model_save':
-   def interrupted(trainer):
-    callback(trainer)
-    raise RuntimeError('SIMULATED_SESSION_INTERRUPTION')
-   return original_add(self,event,interrupted)
-  return original_add(self,event,callback)
- YOLO.add_callback=interrupted_add
- try:
-  train(*args,**kw)
- except RuntimeError as exc:
-  assert str(exc)=='SIMULATED_SESSION_INTERRUPTION', str(exc)
- else:
-  raise AssertionError('Interruption was not reached')
- finally:
-  YOLO.add_callback=original_add
- run=root/'drive_runs'/'resume_test'
- assert json.loads((run/'latest.json').read_text())['completed_epochs']==1
- first=run/'epochs/epoch_000001/checkpoint.pt'
- ckpt=torch.load(first,map_location='cpu',weights_only=False)
- assert ckpt['epoch']==0 and ckpt['optimizer'] is not None and ckpt['ema'].nc==2
- del ckpt
- # Colabローカルが失われた状態を、別パスへの退避で再現する。
- (root/'local_runs').rename(root/'previous_session')
 
- # 2エポック目のDriveコピー失敗時、latestが1のままであることを確認する。
- original_copy=ns['copy_verified']
- def fail_copy(src,dst):
-  if 'epoch_000002' in str(dst) and Path(dst).name=='best.pt':
-   raise IOError('SIMULATED_DRIVE_FAILURE')
-  return original_copy(src,dst)
- ns['copy_verified']=fail_copy
- try:
-  train(*args,**kw)
- except IOError as exc:
-  assert str(exc)=='SIMULATED_DRIVE_FAILURE', str(exc)
- else:
-  raise AssertionError('Drive failure was not reached')
- finally:
-  ns['copy_verified']=original_copy
- assert json.loads((run/'latest.json').read_text())['completed_epochs']==1
+def load_definitions(cell_id, namespace):
+    source = ''.join(next(cell for cell in NOTEBOOK['cells'] if cell.get('id') == cell_id)['source'])
+    definitions = [node for node in ast.parse(source).body if isinstance(node, (ast.ClassDef, ast.FunctionDef))]
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), cell_id, 'exec'), namespace)
 
- result=train(*args,**kw)
- assert result.is_file()
- assert json.loads((run/'latest.json').read_text())['completed_epochs']==2
- second=run/'epochs/epoch_000002/checkpoint.pt'
- ckpt=torch.load(second,map_location='cpu',weights_only=False)
- assert ckpt['epoch']==1 and ckpt['optimizer'] is not None and ckpt['ema'].nc==2
- del ckpt
- rows=list(csv.DictReader((run/'epochs/epoch_000002/results.csv').open()))
- assert [int(row['epoch']) for row in rows]==[1,2]
- assert (run/'final/completed.json').is_file()
- # 完了済みの場合はtrainを呼ばない。
- original_train=YOLO.train
- def unexpected_train(*a,**kw):
-  raise AssertionError('Completed run trained again')
- YOLO.train=unexpected_train
- try:
-  assert train(*args,**kw)==second
- finally:
-  YOLO.train=original_train
- # 既存RUN_NAMEでの設定変更を拒否する。
- try:
-  train(*args[:5],3,*args[6:],**kw)
- except RuntimeError as exc:
-  assert '別設定' in str(exc)
- else:
-  raise AssertionError('Changed configuration accepted')
- # 保存済みファイルの破損を検出する。
- with second.open('ab') as stream:
-  stream.write(b'corrupt')
- try:
-  train(*args,**kw)
- except IOError as exc:
-  assert '検証に失敗' in str(exc)
- else:
-  raise AssertionError('Corrupt snapshot accepted')
-print('PASS: 実YOLOの2クラス学習・エポック保存・セッション中断後の再開・Drive失敗時の再開先保持・CSV復元・完了時スキップ・設定変更拒否・破損検出')
+
+class RecordingDetectionTrainer:
+    def __init__(self, *, overrides):
+        self.overrides = overrides
+        self.callbacks = {}
+        self.save_dir = Path(overrides['project']) / overrides['name']
+
+    def add_callback(self, event, callback):
+        self.callbacks[event] = callback
+
+    def save_model(self):
+        raise AssertionError('標準の重み保存が呼び出されました')
+
+
+class TrainingCellTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        data = self.root / 'data'
+        data.mkdir()
+        (data / 'data.yaml').write_text('names: {0: person, 1: head}\n')
+        for name in ('.build_config.json', 'preparation_report.json'):
+            (data / name).write_text('{}')
+        pretrained = self.root / 'initial.pt'
+        pretrained.write_bytes(b'pretrained placeholder')
+        self.args = (data / 'data.yaml', pretrained, self.root / 'local',
+                     'test_run', 20, 640, 8, 2)
+        self.ns = dict(torch=torch, yaml=yaml, Path=Path,
+                       ultralytics=SimpleNamespace(__version__='8.4.0'),
+                       DetectionTrainer=RecordingDetectionTrainer)
+        load_definitions('training', self.ns)
+
+    def test_new_training_uses_same_optimization_settings_without_checkpoint_io(self):
+        with patch.object(torch, 'load', side_effect=AssertionError('チェックポイントを読み込んだ')):
+            with patch.object(torch, 'save', side_effect=AssertionError('重みを保存した')):
+                trainer = self.ns['create_training'](*self.args, require_cuda=False)
+                # 標準側から最終エポックに保存を要求されても、重みを書き出しません。
+                trainer.save_model()
+        self.assertEqual(trainer.overrides, {
+            'model': str(self.args[1].resolve()), 'data': str(self.args[0].resolve()),
+            'project': str(self.args[2].resolve()), 'name': 'test_run', 'exist_ok': False,
+            'epochs': 20, 'imgsz': 640, 'batch': 8, 'workers': 2, 'device': 0,
+            'optimizer': 'AdamW', 'lr0': 0.001, 'seed': 0, 'patience': 0,
+            'val': True, 'plots': True, 'amp': True, 'cache': False, 'close_mosaic': 10,
+            'save': False, 'save_period': -1, 'resume': False,
+        })
+        self.assertEqual(set(trainer.callbacks), {'on_train_batch_end', 'on_train_epoch_end'})
+        self.assertFalse(self.args[2].exists())
+
+    def test_nan_and_inf_stop_training(self):
+        trainer = self.ns['create_training'](*self.args, require_cuda=False)
+        for field in ('loss', 'loss_items', 'tloss'):
+            for abnormal in (float('nan'), float('inf')):
+                state = SimpleNamespace(epoch=1, loss=torch.tensor(1.),
+                                        loss_items=torch.tensor([1., 2., 3.]), tloss=torch.tensor([1., 2., 3.]))
+                setattr(state, field, torch.tensor([1., abnormal]))
+                for callback in trainer.callbacks.values():
+                    with self.subTest(field=field, abnormal=abnormal):
+                        with self.assertRaises(FloatingPointError):
+                            callback(state)
+        state = SimpleNamespace(epoch=0, loss=torch.tensor(1.),
+                                loss_items=torch.tensor([1., 2., 3.]), tloss=torch.tensor([1., 2., 3.]))
+        for callback in trainer.callbacks.values():
+            callback(state)
+
+    def test_archives_local_logs_without_weights_or_drive_copy(self):
+        logs = self.root / 'local_logs'
+        logs.mkdir()
+        (logs / 'args.yaml').write_text('epochs: 20\ndata: /data/data.yaml\n')
+        (logs / 'results.csv').write_text('epoch, metrics/mAP50-95(B), train/box_loss\n1,0.7,2\n2,0.3,1\n')
+        (logs / 'results.png').write_bytes(b'plot')
+        ns = dict(Path=Path, datetime=datetime, timezone=timezone, timedelta=timedelta,
+                  csv=csv, json=json, math=math, shutil=shutil, tempfile=tempfile, yaml=yaml)
+        load_definitions('download-results', ns)
+        archive = ns['archive_training_results'](logs)
+        self.addCleanup(shutil.rmtree, archive.parent)
+        with zipfile.ZipFile(archive) as zipped:
+            self.assertIsNone(zipped.testzip())
+            names = zipped.namelist()
+            self.assertIn('results.png', names)
+            self.assertFalse(any(name.endswith('.pt') for name in names))
+            summary = json.loads(zipped.read(next(name for name in names if name.startswith('summary_'))))
+            self.assertEqual(summary['total_epochs_run'], 2)
+            self.assertEqual(summary['best_epoch'], 1)
+            self.assertEqual(summary['last_epoch'], 2)
+            self.assertTrue(any(name.startswith('args_') and name.endswith('.txt') for name in names))
+        self.assertEqual({path.name for path in logs.iterdir()}, {'args.yaml', 'results.csv', 'results.png'})
+
+
+if __name__ == '__main__':
+    unittest.main()
