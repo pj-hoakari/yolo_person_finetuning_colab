@@ -1,4 +1,4 @@
-"""ignore領域の黒塗りを合成画像・ZIPで検証。実データ取得や学習は行いません。"""
+"""ignore領域のグレー塗りつぶしを合成画像・ZIPで検証。実データ取得や学習は行いません。"""
 import ast
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -109,8 +109,8 @@ class IgnoreMaskTest(unittest.TestCase):
         self.ns['prepare_dataset'](data, output)
         for split in ('train', 'val'):
             with Image.open(output / 'images' / split / f'{split}_masked.jpg') as image:
-                self.assertEqual(image.getpixel((8, 8)), (0, 0, 0))
-                self.assertEqual(image.getpixel((40, 40)), (0, 0, 0))
+                self.assertEqual(image.getpixel((8, 8)), (114, 114, 114))
+                self.assertEqual(image.getpixel((40, 40)), (114, 114, 114))
                 self.assertEqual(image.getpixel((56, 56)), (200, 200, 200))
             self.assertEqual((output / '.original_images' / split / f'{split}_masked.jpg').read_bytes(), original)
             lines = (output / 'labels' / split / f'{split}_masked.txt').read_text().splitlines()
@@ -131,6 +131,24 @@ class IgnoreMaskTest(unittest.TestCase):
         (output / '.build_config.json').write_text('{"schema":1}')
         with self.assertRaisesRegex(RuntimeError, '別設定'):
             self.ns['prepare_dataset'](data, output)
+
+    def test_black_mask_output_is_regenerated_from_originals(self):
+        data, original = self.dataset()
+        output = self.root / 'prepared'
+        self.ns['prepare_dataset'](data, output)
+        marker = output / '.build_config.json'
+        config = json.loads(marker.read_text())
+        self.assertEqual(config['ignore_mask']['fill'], [114, 114, 114])
+        config['ignore_mask']['fill'] = [0, 0, 0]
+        marker.write_text(json.dumps(config))
+        target = output / 'images/train/train_masked.jpg'
+        Image.new('RGB', (64, 64), (0, 0, 0)).save(target)
+        self.ns['prepare_dataset'](data, output)
+        with Image.open(target) as image:
+            self.assertEqual(image.getpixel((8, 8)), (114, 114, 114))
+            self.assertEqual(image.getpixel((56, 56)), (200, 200, 200))
+        self.assertEqual((output / '.original_images/train/train_masked.jpg').read_bytes(), original)
+        self.assertEqual(json.loads(marker.read_text())['ignore_mask']['fill'], [114, 114, 114])
 
 
 if __name__ == '__main__':
