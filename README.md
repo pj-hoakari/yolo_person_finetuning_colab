@@ -6,7 +6,7 @@ CrowdHumanのvbox（人物の見えている範囲）とhbox（頭部）を使�
 
 GPU確認・Google Drive接続・2クラスのデータセット準備・事前学習モデル取得・学習まで実装しています。重み保存・自動再開は現在無効です。セル1〜6を順番に実行してください。セル6の実行前にエポック数・画像サイズ・バッチサイズ・RUN_NAMEを設定してください。
 
-データ準備では、Driveの `crowdhuman/raw/archives` の4個のZIPと `raw/annotations` のODGT注釈を使用し、`/content/crowdhuman_vbox_yolo` に画像・YOLOラベル・`data.yaml`・集計JSONを作成します。元のtrain・val分割を維持します。既存のprepared tarは使用しません。
+データ準備では、Driveの `crowdhuman/raw/archives` の4個のZIPと `raw/annotations` のODGT注釈を使用し、`/content/crowdhuman_vbox_yolo` に画像・YOLOラベル・`data.yaml`・集計JSONを作成します。元のtrain・val分割を維持します。既存のprepared tarは使用しません。注釈2ファイルがDriveに無い場合は、セル3が公式配布のGoogle Driveから取得します。画像ZIPは自動取得しません。
 
 `tag=person` と無視指定を確認し、vboxをperson、hboxをheadとして変換します。枠を画像内に収め、無効な枠を除外します。無視枠をラベルから除く処理は、学習時の無視領域対応やCrowdHuman公式評価とは異なります。詳細はノートブックのセル4を参照してください。
 
